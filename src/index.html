@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Elysium — Virtual LAN</title>
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <h1>ELYSIUM</h1>
+        <p class="version">v0.1.0</p>
+      </div>
+      <nav>
+        <button class="nav-btn active" data-page="dashboard" onclick="showPage('dashboard')">
+          <span class="nav-icon">📊</span> Dashboard
+        </button>
+        <button class="nav-btn" data-page="create" onclick="showPage('create')">
+          <span class="nav-icon">🔥</span> Create Room
+        </button>
+        <button class="nav-btn" data-page="join" onclick="showPage('join')">
+          <span class="nav-icon">🔗</span> Join Room
+        </button>
+        <button class="nav-btn" data-page="settings" onclick="showPage('settings')">
+          <span class="nav-icon">⚙️</span> Settings
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="status-indicator" id="connectionDot"></div>
+        <span id="connectionText">Disconnected</span>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="content">
+      <!-- Dashboard Page -->
+      <div id="page-dashboard" class="page active">
+        <h2>Dashboard</h2>
+        <div class="cards">
+          <div class="card">
+            <div class="card-label">Status</div>
+            <div class="card-value" id="statusValue">Offline</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Node Name</div>
+            <div class="card-value" id="nodeNameValue">—</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Virtual IP</div>
+            <div class="card-value" id="virtualIpValue">—</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Room</div>
+            <div class="card-value" id="roomCodeValue">—</div>
+          </div>
+        </div>
+
+        <!-- Active Room Section -->
+        <div id="activeRoomSection" class="section hidden">
+          <div class="section-header">
+            <h3>Connected Peers</h3>
+            <button class="btn btn-danger btn-sm" onclick="leaveRoom()">Leave Room</button>
+          </div>
+          <div class="peer-list" id="peerList">
+            <!-- Peers will be populated here -->
+          </div>
+        </div>
+
+        <!-- No Room Section -->
+        <div id="noRoomSection" class="section">
+          <div class="empty-state">
+            <div class="empty-icon">🎮</div>
+            <h3>No Active Room</h3>
+            <p>Create a room or join one with an invite code to start playing.</p>
+            <div class="empty-actions">
+              <button class="btn btn-primary" onclick="showPage('create')">Create Room</button>
+              <button class="btn btn-secondary" onclick="showPage('join')">Join Room</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create Room Page -->
+      <div id="page-create" class="page">
+        <h2>Create Room</h2>
+        <div class="form-section">
+          <p class="description">Create a new virtual LAN room and share the invite code with your friends.</p>
+          <button class="btn btn-primary btn-lg" id="createBtn" onclick="createRoom()">
+            ⚡ Create Room
+          </button>
+          <div id="roomCreatedInfo" class="room-info hidden">
+            <div class="invite-code-container">
+              <label>Your Invite Code</label>
+              <div class="invite-code">
+                <span id="generatedCode">—</span>
+                <button class="btn btn-icon" onclick="copyCode()" title="Copy to clipboard">📋</button>
+              </div>
+              <p class="hint">Share this code with your friends so they can join.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Join Room Page -->
+      <div id="page-join" class="page">
+        <h2>Join Room</h2>
+        <div class="form-section">
+          <p class="description">Enter the invite code shared by the room host to join the virtual LAN.</p>
+          <div class="input-group">
+            <input type="text" id="joinCodeInput" placeholder="ELYSIUM-XXXX-XXXX" maxlength="18"
+                   class="input-field" spellcheck="false" autocomplete="off" />
+            <button class="btn btn-primary" id="joinBtn" onclick="joinRoom()">Join</button>
+          </div>
+          <div id="joinStatus" class="status-message hidden"></div>
+        </div>
+      </div>
+
+      <!-- Settings Page -->
+      <div id="page-settings" class="page">
+        <h2>Settings</h2>
+        <div class="form-section">
+          <div class="setting-group">
+            <label>Node Name</label>
+            <div class="card-value" id="settingsNodeName">—</div>
+          </div>
+          <div class="setting-group">
+            <label>Public Key</label>
+            <div class="mono-text" id="settingsPublicKey">—</div>
+          </div>
+          <div class="setting-group">
+            <label>Virtual Subnet</label>
+            <div class="card-value">10.7.0.0/24</div>
+          </div>
+          <div class="setting-group">
+            <label>WireGuard Port</label>
+            <div class="card-value">51820</div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    // Tauri API helper
+    function getInvoke() {
+      if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
+        return window.__TAURI__.core.invoke;
+      }
+      if (window.__TAURI__ && window.__TAURI__.invoke) {
+        return window.__TAURI__.invoke;
+      }
+      return null;
+    }
+
+    async function invoke(cmd, args = {}) {
+      const fn = getInvoke();
+      if (!fn) {
+        console.warn('Tauri API not ready yet for command:', cmd);
+        throw new Error('Tauri API not initialized');
+      }
+      return await fn(cmd, args);
+    }
+
+    // ── Page Navigation ──
+    function showPage(name) {
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('page-' + name).classList.add('active');
+      document.querySelector(`[data-page="${name}"]`).classList.add('active');
+    }
+
+    // ── Toast ──
+    function showToast(msg, type = 'info') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast ' + type;
+      setTimeout(() => t.classList.add('hidden'), 3000);
+    }
+
+    // ── Create Room ──
+    async function createRoom() {
+      const btn = document.getElementById('createBtn');
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+      try {
+        const code = await invoke('create_room');
+        document.getElementById('generatedCode').textContent = code;
+        document.getElementById('roomCreatedInfo').classList.remove('hidden');
+        btn.textContent = '✅ Room Created';
+        showToast('Room created! Share the code with friends.', 'success');
+        refreshStatus();
+      } catch (e) {
+        showToast('Failed: ' + e, 'error');
+        btn.disabled = false;
+        btn.textContent = '⚡ Create Room';
+      }
+    }
+
+    // ── Join Room ──
+    async function joinRoom() {
+      const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+      if (!code) { showToast('Enter an invite code', 'error'); return; }
+
+      const btn = document.getElementById('joinBtn');
+      const status = document.getElementById('joinStatus');
+      btn.disabled = true;
+      btn.textContent = 'Joining...';
+      status.classList.add('hidden');
+
+      try {
+        const ip = await invoke('join_room', { code });
+        status.textContent = `Connected! Your IP: ${ip}`;
+        status.className = 'status-message success';
+        btn.textContent = '✅ Joined';
+        showToast('Joined room ' + code, 'success');
+        refreshStatus();
+        setTimeout(() => showPage('dashboard'), 1000);
+      } catch (e) {
+        status.textContent = 'Failed: ' + e;
+        status.className = 'status-message error';
+        btn.disabled = false;
+        btn.textContent = 'Join';
+      }
+    }
+
+    // ── Leave Room ──
+    async function leaveRoom() {
+      try {
+        await invoke('leave_room');
+        showToast('Left room', 'info');
+        // Reset create page
+        document.getElementById('createBtn').disabled = false;
+        document.getElementById('createBtn').textContent = '⚡ Create Room';
+        document.getElementById('roomCreatedInfo').classList.add('hidden');
+        // Reset join page
+        document.getElementById('joinBtn').disabled = false;
+        document.getElementById('joinBtn').textContent = 'Join';
+        document.getElementById('joinCodeInput').value = '';
+        document.getElementById('joinStatus').classList.add('hidden');
+        refreshStatus();
+      } catch (e) {
+        showToast('Error: ' + e, 'error');
+      }
+    }
+
+    // ── Copy Code ──
+    function copyCode() {
+      const code = document.getElementById('generatedCode').textContent;
+      navigator.clipboard.writeText(code);
+      showToast('Code copied!', 'success');
+    }
+
+    // ── Refresh Status ──
+    async function refreshStatus() {
+      try {
+        const s = await invoke('get_status');
+
+        // Update dashboard cards
+        document.getElementById('statusValue').textContent = s.connected ? '🟢 Connected' : '⚫ Offline';
+        document.getElementById('nodeNameValue').textContent = s.node_name;
+        document.getElementById('virtualIpValue').textContent = s.virtual_ip || '—';
+        document.getElementById('roomCodeValue').textContent = s.room_code || '—';
+
+        // Connection indicator
+        const dot = document.getElementById('connectionDot');
+        const txt = document.getElementById('connectionText');
+        dot.className = s.connected ? 'status-indicator connected' : 'status-indicator';
+        txt.textContent = s.connected ? 'Connected' : 'Disconnected';
+
+        // Settings page
+        document.getElementById('settingsNodeName').textContent = s.node_name;
+        document.getElementById('settingsPublicKey').textContent = s.public_key;
+
+        // Active room section
+        if (s.connected && s.peers.length > 0) {
+          document.getElementById('activeRoomSection').classList.remove('hidden');
+          document.getElementById('noRoomSection').classList.add('hidden');
+          renderPeers(s.peers);
+        } else {
+          document.getElementById('activeRoomSection').classList.add('hidden');
+          document.getElementById('noRoomSection').classList.remove('hidden');
+        }
+      } catch (e) {
+        console.error('Status refresh failed:', e);
+      }
+    }
+
+    // ── Render Peers ──
+    function renderPeers(peers) {
+      const list = document.getElementById('peerList');
+      list.innerHTML = peers.map(p => `
+        <div class="peer-card">
+          <div class="peer-status ${p.connected ? 'online' : 'offline'}"></div>
+          <div class="peer-info">
+            <div class="peer-name">${escapeHtml(p.node_name)}</div>
+            <div class="peer-ip">${escapeHtml(p.virtual_ip)}</div>
+          </div>
+          <div class="peer-latency">${p.latency_ms != null ? escapeHtml(p.latency_ms.toFixed(1)) + ' ms' : '—'}</div>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // ── Init ──
+    window.addEventListener('DOMContentLoaded', () => {
+      refreshStatus();
+      // Refresh status every 3 seconds
+      setInterval(refreshStatus, 3000);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
+  "identifier": "default",
+  "description": "Elysium default capabilities",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

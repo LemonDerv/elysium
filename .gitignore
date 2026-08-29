@@ -1,0 +1,35 @@
+# Rust
+/target/
+src-tauri/target/
+**/*.rs.bk
+
+# Node/Frontend
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+
+# Tauri
+src-tauri/gen/
+src-tauri/WixExt3/
+src-tauri/WixExt4/
+*.msi
+*.exe
+*.app
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Elysium specific
+wintun.dll
+Elysium.exe
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log

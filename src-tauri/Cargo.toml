@@ -1,0 +1,59 @@
+[package]
+name = "elysium"
+version = "0.1.0"
+description = "Elysium — Peer-to-Peer Virtual LAN for Gaming"
+authors = ["Elysium Contributors"]
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri framework
+tauri = { version = "2", features = [] }
+
+# WireGuard protocol (encryption/decryption)
+boringtun = "0.7"
+
+# Windows TUN virtual adapter
+wintun = "0.5"
+
+# P2P connectivity with automatic NAT traversal
+iroh = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto and randomness
+rand = "0.9"
+base64 = "0.22"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Config directory
+dirs = "6"
+
+# UPnP/NAT-PMP port mapping
+igd-next = "0.16"
+
+# Network utilities
+socket2 = "0.5"
+tauri-plugin-single-instance = "2.4.3"
+
+[[bin]]
+name = "benchmark_dos"
+path = "src/benchmark_dos.rs"
