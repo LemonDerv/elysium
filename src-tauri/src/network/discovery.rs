@@ -42,7 +42,7 @@ impl DiscoveryService {
         
         // Early Rejection: Limit incoming JSON size to 4KB to prevent OOM
         let recv = PeerManager::recv_message(conn, 4096).await?;
-        let mut peer_info: PeerExchangeInfo = serde_json::from_slice(&recv)?;
+        let peer_info: PeerExchangeInfo = serde_json::from_slice(&recv)?;
         
         // Ensure string limits are respected even within the 4KB boundary
         if peer_info.node_name.len() > 64 {

@@ -65,7 +65,8 @@ impl NatTraversal {
                         return Ok(addr);
                     }
                 }
-                offset += 4 + attr_len;
+                let padded_len = (attr_len + 3) & !3;
+                offset += 4 + padded_len;
             }
         }
         

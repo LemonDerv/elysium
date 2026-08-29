@@ -2,9 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(dead_code, unused_variables, unused_imports)]
 
-mod config;
 mod network;
 mod room;
+mod config;
 
 use config::ElysiumConfig;
 use room::{Room, RoomManager};
@@ -138,11 +138,11 @@ async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String> {
             })
             .collect();
 
-        // Find our IP in the room
+        // Find our IP in the room using cryptographic identity
         let our_ip = room
             .peers
             .iter()
-            .find(|p| p.node_name == node_name)
+            .find(|p| p.public_key == public_key)
             .map(|p| p.virtual_ip.to_string());
 
         (true, Some(room.room_code.clone()), our_ip, peers)

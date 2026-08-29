@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: ipc:; script-src 'self' 'unsafe-inline' tauri: ipc:; style-src 'self' 'unsafe-inline' tauri: ipc:; img-src 'self' data: tauri: ipc:;"
+      "csp": "default-src 'self' tauri: ipc:; script-src 'self' tauri: ipc:; style-src 'self' 'unsafe-inline' tauri: ipc:; img-src 'self' data: tauri: ipc:;"
     }
   },
   "bundle": {

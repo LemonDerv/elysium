@@ -93,13 +93,13 @@ impl Room {
             connected: true,
         };
 
-        Self {
+        Ok(Self {
             room_code,
             host_public_key,
             peers: vec![host_peer],
             subnet: "10.7.0.0/24".to_string(),
             created_at: Utc::now().timestamp(),
-        }
+        })
     }
 
     /// Allocate the next available IP address in the 10.7.0.0/24 subnet.
