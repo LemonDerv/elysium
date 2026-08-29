@@ -64,14 +64,12 @@ impl TunnelManager {
         let wintun = unsafe { wintun::load_from_path(&dll_path) }
             .map_err(|e| anyhow!("Failed to load wintun.dll from {:?}: {}", dll_path, e))?;
 
-        // Try to delete any stale adapter with the same name first
-        if let Ok(stale_adapter) = Adapter::open(&wintun, name) {
-            let _ = stale_adapter.delete();
-        }
-
         let guid = ELYSIUM_ADAPTER_GUID;
-        let adapter = Adapter::create(&wintun, name, name, Some(guid))
-            .map_err(|e| anyhow!("Failed to create adapter '{}': {}", name, e))?;
+        let adapter = match Adapter::create(&wintun, name, name, Some(guid)) {
+            Ok(a) => a,
+            Err(_) => Adapter::open(&wintun, name)
+                .map_err(|e| anyhow!("Failed to open existing adapter '{}': {}", name, e))?,
+        };
 
         Ok(Self {
             adapter,
