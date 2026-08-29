@@ -7,7 +7,7 @@ pub const ALPN: &[u8] = b"elysium/lan/1";
 
 /// Manages P2P connections using iroh
 pub struct PeerManager {
-    endpoint: Endpoint,
+    pub endpoint: Endpoint,
 }
 
 impl PeerManager {

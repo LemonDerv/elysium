@@ -56,7 +56,7 @@ async function createRoom() {
 
 // ── Join Room ──
 async function joinRoom() {
-  const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+  const code = document.getElementById('joinCodeInput').value.trim();
   if (!code) { showToast('Enter an invite code', 'error'); return; }
 
   const btn = document.getElementById('joinBtn');

@@ -48,6 +48,9 @@ pub struct TunnelManager {
     session: Option<Arc<Session>>,
 }
 
+/// Fixed GUID so we always reuse the same adapter instead of creating duplicates
+const ELYSIUM_ADAPTER_GUID: u128 = 0xE1_75_10_4D_CA_FE_BA_BE_00_00_00_00_00_00_00_01;
+
 impl TunnelManager {
     /// Creates a WinTUN adapter named "Elysium"
     pub fn create_adapter(name: &str) -> Result<Self> {
@@ -61,11 +64,14 @@ impl TunnelManager {
         let wintun = unsafe { wintun::load_from_path(&dll_path) }
             .map_err(|e| anyhow!("Failed to load wintun.dll from {:?}: {}", dll_path, e))?;
 
-        let adapter = match Adapter::create(&wintun, name, name, None) {
-            Ok(a) => a,
-            Err(_) => Adapter::open(&wintun, name)
-                .map_err(|e| anyhow!("Failed to open existing adapter '{}': {}", name, e))?,
-        };
+        // Try to delete any stale adapter with the same name first
+        if let Ok(stale_adapter) = Adapter::open(&wintun, name) {
+            let _ = stale_adapter.delete();
+        }
+
+        let guid = ELYSIUM_ADAPTER_GUID;
+        let adapter = Adapter::create(&wintun, name, name, Some(guid))
+            .map_err(|e| anyhow!("Failed to create adapter '{}': {}", name, e))?;
 
         Ok(Self {
             adapter,
@@ -79,7 +85,9 @@ impl TunnelManager {
         let name = self.adapter.get_name().map_err(|e| anyhow!("Failed to get adapter name: {}", e))?;
         
         let netsh_bin = resolve_netsh_path();
-        let status = Command::new(netsh_bin)
+        
+        // Set the IP address
+        let status = Command::new(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "set", "address",
                 &format!("name={}", name),
@@ -93,6 +101,16 @@ impl TunnelManager {
         if !status.success() {
             return Err(anyhow!("Failed to set IP via netsh (exit code: {:?})", status.code()));
         }
+        
+        // Set high interface metric so Windows doesn't route internet through this adapter
+        let _ = Command::new(&netsh_bin)
+            .args(&[
+                "interface", "ipv4", "set", "interface",
+                &format!("interface={}", name),
+                "metric=9999",
+            ])
+            .status();
+        
         Ok(())
     }
 

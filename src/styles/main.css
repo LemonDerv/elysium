@@ -429,16 +429,14 @@ h2 {
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 15px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  letter-spacing: 0.5px;
   outline: none;
   transition: border-color 0.2s;
 }
 
 .input-field::placeholder {
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
+  letter-spacing: 0.5px;
 }
 
 .input-field:focus {
@@ -469,16 +467,20 @@ h2 {
 
 .invite-code {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .invite-code span {
   font-family: var(--font-mono);
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
   color: var(--accent-hover);
+  word-break: break-all;
+  line-height: 1.6;
+  user-select: all;
 }
 
 .hint {

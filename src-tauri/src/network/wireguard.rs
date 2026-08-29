@@ -100,46 +100,65 @@ impl WireGuardManager {
         }
     }
 
-    /// Decrypt incoming WireGuard UDP data with strict Cryptokey Routing (AllowedIPs) verification
-    pub fn decrypt_packet(&mut self, peer_ip: Ipv4Addr, src_addr: std::net::SocketAddr, data: &[u8]) -> Result<DecapsulateOutput> {
+    /// Decrypt incoming WireGuard UDP data with strict Cryptokey Routing (AllowedIPs) verification.
+    /// Returns all outputs (handshake responses + decrypted tunnel packets) since boringtun
+    /// chains results that must be drained.
+    pub fn decrypt_packet(&mut self, peer_ip: Ipv4Addr, src_addr: std::net::SocketAddr, data: &[u8]) -> Result<Vec<DecapsulateOutput>> {
         let tunn = self.tunnels.get_mut(&peer_ip)
             .ok_or_else(|| anyhow!("Tunnel not found for peer {}", peer_ip))?;
+        
+        let mut outputs = Vec::new();
+        let mut input_data: Option<&[u8]> = Some(data);
+        
+        loop {
+            let mut buf = vec![0u8; 65536];
+            let actual_data = input_data.take().unwrap_or(&[]);
+            let src_ip = if !actual_data.is_empty() { Some(src_addr.ip()) } else { None };
             
-        let mut buf = vec![0u8; data.len() + 64];
-        match tunn.decapsulate(Some(src_addr.ip()), data, &mut buf) {
-            TunnResult::WriteToNetwork(packet_out) => {
-                debug!("WG decapsulate produced network handshake response for {}", peer_ip);
-                Ok(DecapsulateOutput::NetworkPacket(packet_out.to_vec())) 
-            }
-            TunnResult::WriteToTunnelV4(packet_out, _) => {
-                // Cryptokey Routing enforcement: Verify source IPv4 address
-                if packet_out.len() < 20 {
-                    warn!("Dropped runt IPv4 packet: size {} < 20", packet_out.len());
-                    return Ok(DecapsulateOutput::Done);
+            match tunn.decapsulate(src_ip, actual_data, &mut buf) {
+                TunnResult::WriteToNetwork(packet_out) => {
+                    debug!("WG decapsulate produced network packet for {}", peer_ip);
+                    outputs.push(DecapsulateOutput::NetworkPacket(packet_out.to_vec()));
+                    // Continue looping — there may be more chained results
                 }
-                let src_ip = Ipv4Addr::new(packet_out[12], packet_out[13], packet_out[14], packet_out[15]);
-                if src_ip != peer_ip {
-                    warn!("Cryptokey routing violation: dropped spoofed packet with claimed src {} from peer {}", src_ip, peer_ip);
-                    return Ok(DecapsulateOutput::Done);
+                TunnResult::WriteToTunnelV4(packet_out, _) => {
+                    // Cryptokey Routing enforcement: Verify source IPv4 address
+                    if packet_out.len() < 20 {
+                        warn!("Dropped runt IPv4 packet: size {} < 20", packet_out.len());
+                    } else {
+                        let src_ip_pkt = Ipv4Addr::new(packet_out[12], packet_out[13], packet_out[14], packet_out[15]);
+                        if src_ip_pkt != peer_ip {
+                            warn!("Cryptokey routing violation: dropped spoofed packet with claimed src {} from peer {}", src_ip_pkt, peer_ip);
+                        } else {
+                            // Anti-Lateral Movement: Verify destination IPv4 address is within virtual subnet
+                            // Allow broadcast addresses (255.255.255.255 and subnet broadcast e.g. 10.7.0.255)
+                            let dst_ip_bytes = [packet_out[16], packet_out[17], packet_out[18], packet_out[19]];
+                            let dst_ip = Ipv4Addr::from(dst_ip_bytes);
+                            let dst_ip_u32 = u32::from_be_bytes(dst_ip_bytes);
+                            if !dst_ip.is_broadcast() && (dst_ip_u32 & self.netmask) != self.network {
+                                warn!("Lateral movement blocked: dropped packet destined for external network {} from peer {}", dst_ip, peer_ip);
+                            } else {
+                                outputs.push(DecapsulateOutput::TunnelPacket(packet_out.to_vec()));
+                            }
+                        }
+                    }
+                    // Continue looping — there may be more chained results
                 }
-                
-                // Anti-Lateral Movement: Verify destination IPv4 address is within virtual subnet
-                let dst_ip_bytes = [packet_out[16], packet_out[17], packet_out[18], packet_out[19]];
-                let dst_ip_u32 = u32::from_be_bytes(dst_ip_bytes);
-                if (dst_ip_u32 & self.netmask) != self.network {
-                    let dst_ip = Ipv4Addr::from(dst_ip_bytes);
-                    warn!("Lateral movement blocked: dropped packet destined for external network {} from peer {}", dst_ip, peer_ip);
-                    return Ok(DecapsulateOutput::Done);
+                TunnResult::WriteToTunnelV6(_, _) => {
+                    warn!("Dropped IPv6 packet: only IPv4 is supported in this virtual LAN");
+                    // Continue looping
                 }
-                Ok(DecapsulateOutput::TunnelPacket(packet_out.to_vec()))
+                TunnResult::Done => break,
+                TunnResult::Err(e) => {
+                    if outputs.is_empty() {
+                        return Err(anyhow!("Decapsulation error: {:?}", e));
+                    }
+                    break;
+                }
             }
-            TunnResult::WriteToTunnelV6(_, _) => {
-                warn!("Dropped IPv6 packet: only IPv4 is supported in this virtual LAN");
-                Ok(DecapsulateOutput::Done)
-            }
-            TunnResult::Done => Ok(DecapsulateOutput::Done),
-            TunnResult::Err(e) => Err(anyhow!("Decapsulation error: {:?}", e)),
         }
+        
+        Ok(outputs)
     }
 
     /// Called periodically to handle WireGuard timers

@@ -59,6 +59,6 @@ tauri-plugin-single-instance = "2.4.3"
 name = "benchmark_dos"
 path = "src/benchmark_dos.rs"
 
-[[bin]]
-name = "scratch"
-path = "src/scratch.rs"
+
+
+

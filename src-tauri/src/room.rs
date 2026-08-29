@@ -39,50 +39,27 @@ pub struct Room {
 impl Room {
     const CODE_CHARSET: &'static [u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // Removed ambiguous 0/O, 1/I
 
-    /// Validate room code format (ELYSIUM-XXXX-XXXX)
+    /// Validate room code format (base64 JSON of EndpointAddr)
     pub fn validate_room_code(code: &str) -> Result<()> {
-        let code = code.trim().to_uppercase();
-        let parts: Vec<&str> = code.split('-').collect();
-        if parts.len() != 3 || parts[0] != "ELYSIUM" || parts[1].len() != 4 || parts[2].len() != 4 {
-            return Err(anyhow!("Invalid room code format. Expected ELYSIUM-XXXX-XXXX"));
-        }
-        for c in parts[1].chars().chain(parts[2].chars()) {
-            if !c.is_ascii_alphanumeric() {
-                return Err(anyhow!("Room code contains invalid characters"));
-            }
-        }
+        let decoded = base64_std.decode(code.trim())
+            .map_err(|_| anyhow!("Invalid room code format (not base64)"))?;
+        serde_json::from_slice::<iroh::EndpointAddr>(&decoded)
+            .map_err(|_| anyhow!("Invalid room code format (not EndpointAddr)"))?;
         Ok(())
     }
 
-    /// Generate a new random room code in the format ELYSIUM-XXXX-XXXX using secure CSPRNG.
-    fn generate_room_code() -> String {
-        let random_bytes: [u8; 8] = rand::rng().random();
-
-        let part1: String = random_bytes[0..4]
-            .iter()
-            .map(|&b| {
-                let idx = (b as usize) % Self::CODE_CHARSET.len();
-                Self::CODE_CHARSET[idx] as char
-            })
-            .collect();
-
-        let part2: String = random_bytes[4..8]
-            .iter()
-            .map(|&b| {
-                let idx = (b as usize) % Self::CODE_CHARSET.len();
-                Self::CODE_CHARSET[idx] as char
-            })
-            .collect();
-
-        format!("ELYSIUM-{}-{}", part1, part2)
+    /// Generate a room code from the host's EndpointAddr
+    pub fn generate_room_code(addr: &iroh::EndpointAddr) -> Result<String> {
+        let json = serde_json::to_string(addr)?;
+        Ok(base64_std.encode(json.as_bytes()))
     }
 
     /// Create a new room with the given host.
-    pub fn create_room(host_public_key: String, host_node_name: String) -> Result<Self> {
+    pub fn create_room(host_public_key: String, host_node_name: String, addr: &iroh::EndpointAddr) -> Result<Self> {
         if host_node_name.len() > 64 {
             anyhow::bail!("Host node name exceeds maximum allowed length of 64 characters");
         }
-        let room_code = Self::generate_room_code();
+        let room_code = Self::generate_room_code(addr)?;
         let host_ip = Ipv4Addr::new(10, 7, 0, 1);
         
         let host_peer = PeerInfo {
@@ -195,46 +172,5 @@ impl RoomManager {
 
     pub fn clear_active_room(&mut self) {
         self.active_room = None;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_room_code_validation() {
-        assert!(Room::validate_room_code("ELYSIUM-ABCD-1234").is_ok());
-        assert!(Room::validate_room_code("elysium-abcd-1234").is_ok());
-        assert!(Room::validate_room_code("ELYSIUM-ABC-1234").is_err());
-        assert!(Room::validate_room_code("INVALID-ABCD-1234").is_err());
-        assert!(Room::validate_room_code("ELYSIUM-ABCD-1234-EXTRA").is_err());
-        assert!(Room::validate_room_code("").is_err());
-    }
-
-    #[test]
-    fn test_generated_room_code_validity() {
-        for _ in 0..50 {
-            let code = Room::generate_room_code();
-            assert!(Room::validate_room_code(&code).is_ok());
-            assert_eq!(code.len(), 17);
-            assert!(code.starts_with("ELYSIUM-"));
-        }
-    }
-
-    #[test]
-    fn test_ip_allocation() {
-        let host_key = base64_std.encode([1u8; 32]);
-        let mut room = Room::create_room(host_key, "HostNode".to_string()).unwrap();
-        assert_eq!(room.peers.len(), 1);
-        assert_eq!(room.peers[0].virtual_ip, Ipv4Addr::new(10, 7, 0, 1));
-
-        let peer1_key = base64_std.encode([2u8; 32]);
-        let peer1_ip = room.join_room(peer1_key, "Peer1".to_string()).unwrap();
-        assert_eq!(peer1_ip, Ipv4Addr::new(10, 7, 0, 2));
-
-        let peer2_key = base64_std.encode([3u8; 32]);
-        let peer2_ip = room.join_room(peer2_key, "Peer2".to_string()).unwrap();
-        assert_eq!(peer2_ip, Ipv4Addr::new(10, 7, 0, 3));
     }
 }

@@ -33,22 +33,39 @@ impl DiscoveryService {
         Err(anyhow::anyhow!("Room lookup not implemented yet"))
     }
 
-    /// Exchange WireGuard public keys, virtual IPs, etc., over the iroh connection
-    pub async fn exchange_peer_info(conn: &Connection, our_info: PeerExchangeInfo) -> Result<PeerExchangeInfo> {
-        info!("Exchanging peer info...");
+    /// As a client, send our info and wait for host response
+    pub async fn exchange_peer_info_client(conn: &Connection, our_info: PeerExchangeInfo) -> Result<PeerExchangeInfo> {
+        info!("Sending peer info to host...");
         
         let msg = serde_json::to_vec(&our_info)?;
         PeerManager::send_message(conn, &msg).await?;
         
-        // Early Rejection: Limit incoming JSON size to 4KB to prevent OOM
+        // Wait for response from host
         let recv = PeerManager::recv_message(conn, 4096).await?;
         let peer_info: PeerExchangeInfo = serde_json::from_slice(&recv)?;
         
-        // Ensure string limits are respected even within the 4KB boundary
         if peer_info.node_name.len() > 64 {
-            anyhow::bail!("Peer provided an excessively long node name");
+            anyhow::bail!("Host provided an excessively long node name");
         }
-        
         Ok(peer_info)
+    }
+
+    /// As a host, wait for client info
+    pub async fn exchange_peer_info_host(conn: &Connection) -> Result<PeerExchangeInfo> {
+        info!("Waiting for peer info from client...");
+        let recv = PeerManager::recv_message(conn, 4096).await?;
+        let peer_info: PeerExchangeInfo = serde_json::from_slice(&recv)?;
+        
+        if peer_info.node_name.len() > 64 {
+            anyhow::bail!("Client provided an excessively long node name");
+        }
+        Ok(peer_info)
+    }
+
+    /// As a host, send our response back to client
+    pub async fn send_peer_info_response(conn: &Connection, our_info: PeerExchangeInfo) -> Result<()> {
+        let msg = serde_json::to_vec(&our_info)?;
+        PeerManager::send_message(conn, &msg).await?;
+        Ok(())
     }
 }
