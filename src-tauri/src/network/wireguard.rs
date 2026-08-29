@@ -101,12 +101,12 @@ impl WireGuardManager {
     }
 
     /// Decrypt incoming WireGuard UDP data with strict Cryptokey Routing (AllowedIPs) verification
-    pub fn decrypt_packet(&mut self, peer_ip: Ipv4Addr, data: &[u8]) -> Result<DecapsulateOutput> {
+    pub fn decrypt_packet(&mut self, peer_ip: Ipv4Addr, src_addr: std::net::SocketAddr, data: &[u8]) -> Result<DecapsulateOutput> {
         let tunn = self.tunnels.get_mut(&peer_ip)
             .ok_or_else(|| anyhow!("Tunnel not found for peer {}", peer_ip))?;
             
         let mut buf = vec![0u8; data.len() + 64];
-        match tunn.decapsulate(None, data, &mut buf) {
+        match tunn.decapsulate(Some(src_addr.ip()), data, &mut buf) {
             TunnResult::WriteToNetwork(packet_out) => {
                 debug!("WG decapsulate produced network handshake response for {}", peer_ip);
                 Ok(DecapsulateOutput::NetworkPacket(packet_out.to_vec())) 

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Elysium — Peer-to-Peer Virtual LAN for Gaming"
 authors = ["Elysium Contributors"]
 edition = "2024"
+default-run = "elysium"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

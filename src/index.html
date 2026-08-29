@@ -63,7 +63,7 @@
         <div id="activeRoomSection" class="section hidden">
           <div class="section-header">
             <h3>Connected Peers</h3>
-            <button class="btn btn-danger btn-sm" onclick="leaveRoom()">Leave Room</button>
+            <button class="btn btn-danger btn-sm">Leave Room</button>
           </div>
           <div class="peer-list" id="peerList">
             <!-- Peers will be populated here -->
@@ -77,8 +77,8 @@
             <h3>No Active Room</h3>
             <p>Create a room or join one with an invite code to start playing.</p>
             <div class="empty-actions">
-              <button class="btn btn-primary" onclick="showPage('create')">Create Room</button>
-              <button class="btn btn-secondary" onclick="showPage('join')">Join Room</button>
+              <button class="btn btn-primary">Create Room</button>
+              <button class="btn btn-secondary">Join Room</button>
             </div>
           </div>
         </div>
@@ -97,7 +97,7 @@
               <label>Your Invite Code</label>
               <div class="invite-code">
                 <span id="generatedCode">—</span>
-                <button class="btn btn-icon" onclick="copyCode()" title="Copy to clipboard">📋</button>
+                <button class="btn btn-icon" title="Copy to clipboard">📋</button>
               </div>
               <p class="hint">Share this code with your friends so they can join.</p>
             </div>
