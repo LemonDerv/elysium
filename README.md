@@ -6,15 +6,6 @@ A high-performance peer-to-peer virtual LAN designed primarily for gaming and lo
 
 Elysium creates a virtual subnet (e.g., `10.7.0.0/24`) and connects peers securely using a decentralized model.
 
-```mermaid
-flowchart TD
-    User --> Frontend[Tauri Frontend]
-    Frontend --> Backend[Rust Backend]
-    Backend --> Network[Elysium Networking]
-    Network --> WG[WireGuard / boringtun]
-    WG --> TUN[Virtual Network Adapter]
-    TUN --> VLAN[Virtual LAN]
-```
 
 ## Features
 
