@@ -9,8 +9,6 @@ pub mod peer;
 pub mod tunnel;
 pub mod wireguard;
 
-#[cfg(test)]
-
 
 use crate::network::peer::PeerManager;
 use crate::network::tunnel::TunnelManager;
