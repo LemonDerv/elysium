@@ -3,6 +3,8 @@ use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
 /// Result of decapsulating a packet
@@ -16,11 +18,140 @@ pub enum DecapsulateOutput {
     Done,
 }
 
-/// Manages WireGuard tunnels for peers
+/// Per-peer tunnel state with reusable buffers.
+///
+/// Each peer gets its own `PeerTunnel` behind an `Arc<Mutex<>>`, so
+/// Peer A's crypto work never blocks Peer B.
+pub struct PeerTunnel {
+    tunn: Box<Tunn>,
+    decrypt_buf: Vec<u8>,
+    encrypt_buf: Vec<u8>,
+}
+
+impl PeerTunnel {
+    fn new(tunn: Tunn) -> Self {
+        Self {
+            tunn: Box::new(tunn),
+            decrypt_buf: vec![0u8; 65536],
+            encrypt_buf: vec![0u8; 2048],
+        }
+    }
+
+    /// Encrypt an outgoing IP packet, returns WireGuard UDP payload.
+    /// Uses the per-peer reusable encrypt buffer.
+    pub fn encrypt_packet(&mut self, peer_ip: Ipv4Addr, packet: &[u8]) -> Result<Vec<u8>> {
+        // Validate destination IP if packet contains an IPv4 header
+        if packet.len() >= 20 {
+            let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            if dst_ip != peer_ip && !dst_ip.is_broadcast() && dst_ip != Ipv4Addr::new(10, 7, 0, 255) {
+                warn!("Outgoing packet destination {} does not match peer tunnel IP {}", dst_ip, peer_ip);
+            }
+        }
+
+        let needed = packet.len() + 32 + 16; // WG header + MACs
+        if self.encrypt_buf.len() < needed {
+            self.encrypt_buf.resize(needed, 0);
+        }
+
+        match self.tunn.encapsulate(packet, &mut self.encrypt_buf) {
+            TunnResult::WriteToNetwork(packet_out) => {
+                Ok(packet_out.to_vec())
+            }
+            TunnResult::Err(e) => Err(anyhow!("Encapsulation error: {:?}", e)),
+            _ => Err(anyhow!("Failed to encapsulate packet")),
+        }
+    }
+
+    /// Decrypt incoming WireGuard UDP data with strict Cryptokey Routing verification.
+    /// Uses the per-peer reusable decrypt buffer.
+    pub fn decrypt_packet(
+        &mut self,
+        peer_ip: Ipv4Addr,
+        src_addr: std::net::SocketAddr,
+        data: &[u8],
+        network: u32,
+        netmask: u32,
+    ) -> Result<Vec<DecapsulateOutput>> {
+        let mut outputs = Vec::new();
+        let mut input_data: Option<&[u8]> = Some(data);
+
+        loop {
+            let actual_data = input_data.take().unwrap_or(&[]);
+            let src_ip = if !actual_data.is_empty() { Some(src_addr.ip()) } else { None };
+
+            match self.tunn.decapsulate(src_ip, actual_data, &mut self.decrypt_buf) {
+                TunnResult::WriteToNetwork(packet_out) => {
+                    debug!("WG decapsulate produced network packet for {}", peer_ip);
+                    outputs.push(DecapsulateOutput::NetworkPacket(packet_out.to_vec()));
+                    // Continue looping — there may be more chained results
+                }
+                TunnResult::WriteToTunnelV4(packet_out, _) => {
+                    // Cryptokey Routing enforcement: Verify source IPv4 address
+                    if packet_out.len() < 20 {
+                        warn!("Dropped runt IPv4 packet: size {} < 20", packet_out.len());
+                    } else {
+                        let src_ip_pkt = Ipv4Addr::new(packet_out[12], packet_out[13], packet_out[14], packet_out[15]);
+                        if src_ip_pkt != peer_ip {
+                            warn!("Cryptokey routing violation: dropped spoofed packet with claimed src {} from peer {}", src_ip_pkt, peer_ip);
+                        } else {
+                            // Anti-Lateral Movement: Verify destination IPv4 address is within virtual subnet
+                            // Allow broadcast addresses (255.255.255.255 and subnet broadcast e.g. 10.7.0.255)
+                            let dst_ip_bytes = [packet_out[16], packet_out[17], packet_out[18], packet_out[19]];
+                            let dst_ip = Ipv4Addr::from(dst_ip_bytes);
+                            let dst_ip_u32 = u32::from_be_bytes(dst_ip_bytes);
+                            if !dst_ip.is_broadcast() && (dst_ip_u32 & netmask) != network {
+                                warn!("Lateral movement blocked: dropped packet destined for external network {} from peer {}", dst_ip, peer_ip);
+                            } else {
+                                outputs.push(DecapsulateOutput::TunnelPacket(packet_out.to_vec()));
+                            }
+                        }
+                    }
+                    // Continue looping — there may be more chained results
+                }
+                TunnResult::WriteToTunnelV6(_, _) => {
+                    warn!("Dropped IPv6 packet: only IPv4 is supported in this virtual LAN");
+                    // Continue looping
+                }
+                TunnResult::Done => break,
+                TunnResult::Err(e) => {
+                    if outputs.is_empty() {
+                        return Err(anyhow!("Decapsulation error: {:?}", e));
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(outputs)
+    }
+
+    /// Handle WireGuard timer for this peer. Returns an optional packet to send.
+    pub fn update_timers(&mut self) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 1024];
+        match self.tunn.update_timers(&mut buf) {
+            TunnResult::WriteToNetwork(packet_out) => {
+                Some(packet_out.to_vec())
+            }
+            _ => None,
+        }
+    }
+
+    /// Direct access to the underlying Tunn for handshake operations.
+    pub fn tunn_mut(&mut self) -> &mut Tunn {
+        &mut self.tunn
+    }
+}
+
+/// Manages WireGuard tunnels for peers.
+///
+/// Each peer gets its own `Arc<Mutex<PeerTunnel>>` so that:
+/// - Encrypt/decrypt for different peers can run concurrently
+/// - The manager itself only needs a read-lock for peer lookup
+/// - Write-lock is only needed when adding/removing peers (rare)
 pub struct WireGuardManager {
-    tunnels: HashMap<Ipv4Addr, Box<Tunn>>,
-    network: u32,
-    netmask: u32,
+    peers: HashMap<Ipv4Addr, Arc<Mutex<PeerTunnel>>>,
+    pub network: u32,
+    pub netmask: u32,
     rate_limiter: Option<std::sync::Arc<boringtun::noise::rate_limiter::RateLimiter>>,
 }
 
@@ -29,7 +160,7 @@ impl WireGuardManager {
     pub fn new(subnet: &str) -> Result<Self> {
         let (network, netmask) = Self::parse_cidr(subnet)?;
         Ok(Self {
-            tunnels: HashMap::new(),
+            peers: HashMap::new(),
             network,
             netmask,
             rate_limiter: None,
@@ -72,106 +203,30 @@ impl WireGuardManager {
             0,
             self.rate_limiter.clone(),
         );
-        
-        self.tunnels.insert(peer_ip, Box::new(tunn));
+
+        self.peers.insert(peer_ip, Arc::new(Mutex::new(PeerTunnel::new(tunn))));
         Ok(())
     }
 
-    /// Encrypt an outgoing IP packet, returns WireGuard UDP payload
-    pub fn encrypt_packet(&mut self, peer_ip: Ipv4Addr, packet: &[u8]) -> Result<Vec<u8>> {
-        // Validate destination IP if packet contains an IPv4 header
-        if packet.len() >= 20 {
-            let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-            if dst_ip != peer_ip && !dst_ip.is_broadcast() && dst_ip != Ipv4Addr::new(10, 7, 0, 255) {
-                warn!("Outgoing packet destination {} does not match peer tunnel IP {}", dst_ip, peer_ip);
-            }
-        }
-
-        let tunn = self.tunnels.get_mut(&peer_ip)
-            .ok_or_else(|| anyhow!("Tunnel not found for peer {}", peer_ip))?;
-            
-        let mut buf = vec![0u8; packet.len() + 32 + 16]; // Padding for WG header and MACs
-        match tunn.encapsulate(packet, &mut buf) {
-            TunnResult::WriteToNetwork(packet_out) => {
-                Ok(packet_out.to_vec())
-            }
-            TunnResult::Err(e) => Err(anyhow!("Encapsulation error: {:?}", e)),
-            _ => Err(anyhow!("Failed to encapsulate packet")),
-        }
+    /// Get a handle to a peer's tunnel. Cheap — just a HashMap lookup, no crypto.
+    /// The caller can then lock the peer independently.
+    pub fn get_peer(&self, peer_ip: Ipv4Addr) -> Option<Arc<Mutex<PeerTunnel>>> {
+        self.peers.get(&peer_ip).cloned()
     }
 
-    /// Decrypt incoming WireGuard UDP data with strict Cryptokey Routing (AllowedIPs) verification.
-    /// Returns all outputs (handshake responses + decrypted tunnel packets) since boringtun
-    /// chains results that must be drained.
-    pub fn decrypt_packet(&mut self, peer_ip: Ipv4Addr, src_addr: std::net::SocketAddr, data: &[u8]) -> Result<Vec<DecapsulateOutput>> {
-        let tunn = self.tunnels.get_mut(&peer_ip)
-            .ok_or_else(|| anyhow!("Tunnel not found for peer {}", peer_ip))?;
-        
-        let mut outputs = Vec::new();
-        let mut input_data: Option<&[u8]> = Some(data);
-        
-        loop {
-            let mut buf = vec![0u8; 65536];
-            let actual_data = input_data.take().unwrap_or(&[]);
-            let src_ip = if !actual_data.is_empty() { Some(src_addr.ip()) } else { None };
-            
-            match tunn.decapsulate(src_ip, actual_data, &mut buf) {
-                TunnResult::WriteToNetwork(packet_out) => {
-                    debug!("WG decapsulate produced network packet for {}", peer_ip);
-                    outputs.push(DecapsulateOutput::NetworkPacket(packet_out.to_vec()));
-                    // Continue looping — there may be more chained results
-                }
-                TunnResult::WriteToTunnelV4(packet_out, _) => {
-                    // Cryptokey Routing enforcement: Verify source IPv4 address
-                    if packet_out.len() < 20 {
-                        warn!("Dropped runt IPv4 packet: size {} < 20", packet_out.len());
-                    } else {
-                        let src_ip_pkt = Ipv4Addr::new(packet_out[12], packet_out[13], packet_out[14], packet_out[15]);
-                        if src_ip_pkt != peer_ip {
-                            warn!("Cryptokey routing violation: dropped spoofed packet with claimed src {} from peer {}", src_ip_pkt, peer_ip);
-                        } else {
-                            // Anti-Lateral Movement: Verify destination IPv4 address is within virtual subnet
-                            // Allow broadcast addresses (255.255.255.255 and subnet broadcast e.g. 10.7.0.255)
-                            let dst_ip_bytes = [packet_out[16], packet_out[17], packet_out[18], packet_out[19]];
-                            let dst_ip = Ipv4Addr::from(dst_ip_bytes);
-                            let dst_ip_u32 = u32::from_be_bytes(dst_ip_bytes);
-                            if !dst_ip.is_broadcast() && (dst_ip_u32 & self.netmask) != self.network {
-                                warn!("Lateral movement blocked: dropped packet destined for external network {} from peer {}", dst_ip, peer_ip);
-                            } else {
-                                outputs.push(DecapsulateOutput::TunnelPacket(packet_out.to_vec()));
-                            }
-                        }
-                    }
-                    // Continue looping — there may be more chained results
-                }
-                TunnResult::WriteToTunnelV6(_, _) => {
-                    warn!("Dropped IPv6 packet: only IPv4 is supported in this virtual LAN");
-                    // Continue looping
-                }
-                TunnResult::Done => break,
-                TunnResult::Err(e) => {
-                    if outputs.is_empty() {
-                        return Err(anyhow!("Decapsulation error: {:?}", e));
-                    }
-                    break;
-                }
-            }
-        }
-        
-        Ok(outputs)
+    /// Removes a peer from the WireGuard manager.
+    pub fn remove_peer(&mut self, peer_ip: Ipv4Addr) {
+        self.peers.remove(&peer_ip);
     }
 
-    /// Called periodically to handle WireGuard timers
-    pub fn handle_timer(&mut self) -> Vec<(Ipv4Addr, Vec<u8>)> {
+    /// Called periodically to handle WireGuard timers for all peers.
+    pub async fn handle_timer(&self) -> Vec<(Ipv4Addr, Vec<u8>)> {
         let mut timer_packets = Vec::new();
-        for (ip, tunn) in self.tunnels.iter_mut() {
-            let mut buf = vec![0u8; 1024];
-            match tunn.update_timers(&mut buf) {
-                TunnResult::WriteToNetwork(packet_out) => {
-                    trace!("Timer triggered network write for {}", ip);
-                    timer_packets.push((*ip, packet_out.to_vec()));
-                }
-                _ => {}
+        for (&ip, peer) in self.peers.iter() {
+            let mut pt = peer.lock().await;
+            if let Some(packet) = pt.update_timers() {
+                trace!("Timer triggered network write for {}", ip);
+                timer_packets.push((ip, packet));
             }
         }
         timer_packets
@@ -196,6 +251,6 @@ mod tests {
         
         // Cannot easily construct a valid AEAD encrypted runt packet because boringtun requires keys
         // We verify the logic manually, and this test ensures compilation of the module and new bounds check existence.
-        assert!(wg_mgr.tunnels.contains_key(&peer_ip));
+        assert!(wg_mgr.peers.contains_key(&peer_ip));
     }
 }

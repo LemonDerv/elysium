@@ -32,7 +32,7 @@ fn resolve_wintun_dll_path() -> Result<PathBuf> {
 }
 
 /// Resolve the absolute path to netsh.exe to prevent PATH environment variable hijacking.
-fn resolve_netsh_path() -> PathBuf {
+pub fn resolve_netsh_path() -> PathBuf {
     if let Ok(sys_root) = std::env::var("SystemRoot") {
         let netsh = Path::new(&sys_root).join("System32").join("netsh.exe");
         if netsh.exists() {
@@ -141,11 +141,17 @@ impl TunnelManager {
         Ok(())
     }
 
+    pub fn validate_packet_size(size: usize) -> Result<()> {
+        if size > u16::MAX as usize || size == 0 {
+            anyhow::bail!("Packet size {} is invalid for WinTUN", size);
+        }
+        Ok(())
+    }
+
     /// Writes a decrypted packet to the TUN adapter
     pub fn write_packet(&self, packet: &[u8]) -> Result<()> {
-        if packet.len() > u16::MAX as usize || packet.is_empty() {
-            anyhow::bail!("Packet size {} is invalid for WinTUN", packet.len());
-        }
+        Self::validate_packet_size(packet.len())?;
+        
         if let Some(session) = &self.session {
             let mut send_pack = session.allocate_send_packet(packet.len() as u16)
                 .map_err(|e| anyhow!("Failed to allocate send packet: {}", e))?;
@@ -172,27 +178,15 @@ mod tests {
 
     #[test]
     fn test_vuln4_u16_truncation_rejection() {
-        let tunnel_mgr = TunnelManager {
-            adapter: unsafe { std::mem::MaybeUninit::zeroed().assume_init() },
-            session: None,
-        };
-        
-        let packet_65535 = vec![0u8; 65535];
-        let result = tunnel_mgr.write_packet(&packet_65535);
-        assert!(result.is_err()); 
-        assert_eq!(result.unwrap_err().to_string(), "Session not started");
+        let result_valid = TunnelManager::validate_packet_size(65535);
+        assert!(result_valid.is_ok());
 
-        let packet_65536 = vec![0u8; 65536];
-        let result = tunnel_mgr.write_packet(&packet_65536);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Packet size 65536 is invalid for WinTUN");
+        let result_too_large = TunnelManager::validate_packet_size(65536);
+        assert!(result_too_large.is_err());
+        assert_eq!(result_too_large.unwrap_err().to_string(), "Packet size 65536 is invalid for WinTUN");
         
-        let packet_empty = vec![0u8; 0];
-        let result = tunnel_mgr.write_packet(&packet_empty);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Packet size 0 is invalid for WinTUN");
-        
-        // Prevent Drop from running on the zeroed Arc causing Access Violation
-        std::mem::forget(tunnel_mgr);
+        let result_empty = TunnelManager::validate_packet_size(0);
+        assert!(result_empty.is_err());
+        assert_eq!(result_empty.unwrap_err().to_string(), "Packet size 0 is invalid for WinTUN");
     }
 }

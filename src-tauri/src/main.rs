@@ -103,50 +103,63 @@ async fn create_room(state: State<'_, AppState>) -> Result<String, String> {
         
         let ep = engine.endpoint.clone();
         while let Some(incoming) = ep.accept().await {
-            match incoming.accept() {
-                Ok(accepting) => match accepting.await {
-                    Ok(conn) => {
-                        let remote_id = conn.remote_id();
-                        info!("Accepted connection from {}", remote_id);
-                        
-                        // Wait for exchange info from joining client
-                        if let Ok(peer_info) = network::discovery::DiscoveryService::exchange_peer_info_host(&conn).await {
-                            // Add peer to Room and allocate IP
-                            let mut rm = rm_clone.lock().await;
-                            if let Some(room) = rm.get_active_room_mut() {
-                                if let Ok(ip) = room.join_room(peer_info.wg_public_key.clone(), peer_info.node_name.clone()) {
-                                    // Reply with HOST's info and the allocated IP
-                                    let response = network::discovery::PeerExchangeInfo {
-                                        wg_public_key: host_public_key.clone(),
-                                        virtual_ip: ip,
-                                        udp_endpoints: vec![],
-                                        node_name: host_node_name.clone(),
-                                    };
-                                    drop(rm);
-                                    let _ = network::discovery::DiscoveryService::send_peer_info_response(&conn, response).await;
-                                    
-                                    // Setup WG tunnel for this peer
-                                    let n = ne_clone.lock().await;
-                                    if let Some(e) = n.as_ref() {
-                                        let decoded = base64::engine::general_purpose::STANDARD.decode(&peer_info.wg_public_key).unwrap();
-                                        let mut bytes = [0u8; 32];
-                                        bytes.copy_from_slice(&decoded);
-                                        let peer_pk = boringtun::x25519::PublicKey::from(bytes);
+            let rm_clone = rm_clone.clone();
+            let host_public_key = host_public_key.clone();
+            let host_node_name = host_node_name.clone();
+            let ne_clone = ne_clone.clone();
+            let sk = sk.clone();
+            
+            tokio::spawn(async move {
+                match incoming.accept() {
+                    Ok(accepting) => match accepting.await {
+                        Ok(conn) => {
+                            let remote_id = conn.remote_id();
+                            info!("Accepted connection from {}", remote_id);
+                            
+                            // Wait for exchange info from joining client with a 5s timeout
+                            if let Ok(Ok(peer_info)) = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                network::discovery::DiscoveryService::exchange_peer_info_host(&conn)
+                            ).await {
+                                // Add peer to Room and allocate IP
+                                let mut rm = rm_clone.lock().await;
+                                if let Some(room) = rm.get_active_room_mut() {
+                                    if let Ok(ip) = room.join_room(peer_info.wg_public_key.clone(), peer_info.node_name.clone()) {
+                                        // Reply with HOST's info and the allocated IP
+                                        let response = network::discovery::PeerExchangeInfo {
+                                            wg_public_key: host_public_key.clone(),
+                                            virtual_ip: ip,
+                                            udp_endpoints: vec![],
+                                            node_name: host_node_name.clone(),
+                                        };
+                                        drop(rm);
+                                        let _ = network::discovery::DiscoveryService::send_peer_info_response(&conn, response).await;
                                         
-                                        let mut wg = e.wg_manager.write().await;
-                                        let _ = wg.create_tunnel(&sk, &peer_pk, ip);
-                                        drop(wg);
-                                        
-                                        e.add_connection(ip, conn).await;
+                                        // Setup WG tunnel for this peer
+                                        let n = ne_clone.lock().await;
+                                        if let Some(e) = n.as_ref() {
+                                            let decoded = base64::engine::general_purpose::STANDARD.decode(&peer_info.wg_public_key).unwrap();
+                                            let mut bytes = [0u8; 32];
+                                            bytes.copy_from_slice(&decoded);
+                                            let peer_pk = boringtun::x25519::PublicKey::from(bytes);
+                                            
+                                            let mut wg = e.wg_manager.write().await;
+                                            let _ = wg.create_tunnel(&sk, &peer_pk, ip);
+                                            drop(wg);
+                                            
+                                            e.add_connection(ip, conn).await;
+                                        }
                                     }
                                 }
+                            } else {
+                                error!("Timeout or error exchanging peer info with {}", remote_id);
                             }
                         }
-                    }
-                    Err(e) => error!("Failed to establish accepted connection: {}", e),
-                },
-                Err(e) => error!("Failed to accept incoming: {}", e),
-            }
+                        Err(e) => error!("Failed to establish accepted connection: {}", e),
+                    },
+                    Err(e) => error!("Failed to accept incoming: {}", e),
+                }
+            });
         }
     });
 
@@ -310,7 +323,7 @@ async fn get_known_rooms(state: State<'_, AppState>) -> Result<Vec<String>, Stri
 fn main() {
     // Add firewall rule for the app
     if let Ok(exe_path) = std::env::current_exe() {
-        let _ = std::process::Command::new("netsh")
+        let _ = std::process::Command::new(crate::network::tunnel::resolve_netsh_path())
             .args(&[
                 "advfirewall", "firewall", "add", "rule",
                 "name=Elysium LAN",

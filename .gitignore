@@ -33,3 +33,5 @@ Elysium.exe
 .vscode/
 *.swp
 *.log
+
+tests_and_benchmarks/

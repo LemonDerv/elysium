@@ -50,6 +50,77 @@ impl Default for ElysiumConfig {
     }
 }
 
+#[cfg(windows)]
+mod dpapi {
+    use std::ptr;
+    use winapi::um::dpapi::{CryptProtectData, CryptUnprotectData};
+    use winapi::um::wincrypt::DATA_BLOB;
+    use winapi::um::winbase::LocalFree;
+    
+    pub fn encrypt(data: &str) -> Option<String> {
+        use base64::Engine;
+        let mut data_in = DATA_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut _,
+        };
+        let mut data_out = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        
+        unsafe {
+            let res = CryptProtectData(
+                &mut data_in,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                &mut data_out,
+            );
+            if res != 0 && !data_out.pbData.is_null() {
+                let slice = std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(slice);
+                LocalFree(data_out.pbData as *mut _);
+                Some(b64)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn decrypt(b64: &str) -> Option<String> {
+        use base64::Engine;
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(b64) {
+            Ok(d) => d,
+            Err(_) => return None,
+        };
+        
+        let mut data_in = DATA_BLOB {
+            cbData: decoded.len() as u32,
+            pbData: decoded.as_ptr() as *mut _,
+        };
+        let mut data_out = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        
+        unsafe {
+            let res = CryptUnprotectData(
+                &mut data_in,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                &mut data_out,
+            );
+            if res != 0 && !data_out.pbData.is_null() {
+                let slice = std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize);
+                let string = String::from_utf8(slice.to_vec()).ok();
+                LocalFree(data_out.pbData as *mut _);
+                string
+            } else {
+                None
+            }
+        }
+    }
+}
+
 impl ElysiumConfig {
     /// Get the path to the configuration file.
     fn get_config_path() -> Result<PathBuf> {
@@ -65,8 +136,22 @@ impl ElysiumConfig {
         if config_path.exists() {
             let content = fs::read_to_string(&config_path)
                 .context("Failed to read config file")?;
-            let config: ElysiumConfig = toml::from_str(&content)
+            let mut config: ElysiumConfig = toml::from_str(&content)
                 .context("Failed to parse config file")?;
+            
+            #[cfg(windows)]
+            if config.private_key_base64.starts_with("dpapi:") {
+                let encrypted_b64 = config.private_key_base64.strip_prefix("dpapi:").unwrap();
+                if let Some(decrypted) = dpapi::decrypt(encrypted_b64) {
+                    config.private_key_base64 = decrypted;
+                } else {
+                    anyhow::bail!("Failed to decrypt DPAPI private key");
+                }
+            } else {
+                info!("Plaintext private key detected, it will be encrypted on next save.");
+                let c2 = config.clone();
+                let _ = c2.save(); // Opportunistically encrypt it on disk
+            }
             
             // Validate keypair integrity on load
             config.get_keypair().context("Corrupted private key in config")?;
@@ -87,7 +172,15 @@ impl ElysiumConfig {
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
-        let content = toml::to_string_pretty(self)
+        
+        let mut to_save = self.clone();
+        
+        #[cfg(windows)]
+        if let Some(encrypted) = dpapi::encrypt(&to_save.private_key_base64) {
+            to_save.private_key_base64 = format!("dpapi:{}", encrypted);
+        }
+        
+        let content = toml::to_string_pretty(&to_save)
             .context("Failed to serialize configuration")?;
         fs::write(&config_path, content)
             .context("Failed to write config file")?;
