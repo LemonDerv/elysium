@@ -1,4 +1,6 @@
-// Tauri API helper
+// ── Elysium — Virtual LAN — Client Engine & UI Controller ──
+
+// Tauri API invoke helper
 function getInvoke() {
   if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
     return window.__TAURI__.core.invoke;
@@ -12,152 +14,434 @@ function getInvoke() {
 async function invoke(cmd, args = {}) {
   const fn = getInvoke();
   if (!fn) {
-    console.warn('Tauri API not ready yet for command:', cmd);
+    console.warn('Tauri API not ready for command:', cmd);
     throw new Error('Tauri API not initialized');
   }
   return await fn(cmd, args);
 }
 
+// ── State Cache ──
+let lastStatusJson = null;
+let currentStatus = null;
+let toastTimeout = null;
+
 // ── Page Navigation ──
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('page-' + name).classList.add('active');
-  const navBtn = document.querySelector(`[data-page="${name}"]`);
-  if (navBtn) navBtn.classList.add('active');
-}
-
-// ── Toast ──
-function showToast(msg, type = 'info') {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'toast ' + type;
-  setTimeout(() => t.classList.add('hidden'), 3000);
-}
-
-// ── Create Room ──
-async function createRoom() {
-  const btn = document.getElementById('createBtn');
-  btn.disabled = true;
-  btn.textContent = 'Creating...';
-  try {
-    const code = await invoke('create_room');
-    document.getElementById('generatedCode').textContent = code;
-    document.getElementById('roomCreatedInfo').classList.remove('hidden');
-    btn.textContent = '✅ Room Created';
-    showToast('Room created! Share the code with friends.', 'success');
-    refreshStatus();
-  } catch (e) {
-    showToast('Failed: ' + e, 'error');
-    btn.disabled = false;
-    btn.textContent = '⚡ Create Room';
+  
+  const targetPage = document.getElementById('page-' + name);
+  if (targetPage) {
+    targetPage.classList.add('active');
+  }
+  
+  const navBtn = document.querySelector(`.nav-btn[data-page="${name}"]`);
+  if (navBtn) {
+    navBtn.classList.add('active');
   }
 }
 
-// ── Join Room ──
+// ── Toast Notification System ──
+function showToast(msg, type = 'info') {
+  const toast = document.getElementById('toast');
+  const toastMsg = document.getElementById('toastMessage');
+  const toastIcon = document.getElementById('toastIcon');
+  if (!toast || !toastMsg) return;
+
+  if (toastTimeout) {
+    clearTimeout(toastTimeout);
+  }
+
+  toastMsg.textContent = msg;
+  toast.className = `toast ${type}`;
+
+  if (toastIcon) {
+    let iconHref = '#icon-info';
+    if (type === 'success') iconHref = '#icon-check';
+    if (type === 'error') iconHref = '#icon-alert';
+    toastIcon.innerHTML = `<use href="${iconHref}"></use>`;
+  }
+
+  toastTimeout = setTimeout(() => {
+    toast.classList.add('hidden');
+  }, 3500);
+}
+
+// ── Clipboard Copy Helper with Visual Feedback ──
+function copyToClipboard(text, successMsg = 'Copied to clipboard', btnEl = null) {
+  if (!text || text === '—') return;
+  navigator.clipboard.writeText(text).then(() => {
+    showToast(successMsg, 'success');
+    if (btnEl) {
+      const originalHtml = btnEl.innerHTML;
+      btnEl.classList.add('btn-copied');
+      btnEl.innerHTML = '<svg class="icon icon-sm" style="color: var(--status-connected);"><use href="#icon-check"></use></svg>';
+      setTimeout(() => {
+        btnEl.innerHTML = originalHtml;
+        btnEl.classList.remove('btn-copied');
+      }, 1500);
+    }
+  }).catch(err => {
+    console.error('Copy failed:', err);
+    showToast('Failed to copy', 'error');
+  });
+}
+
+// ── Create Room Action ──
+async function createRoom() {
+  if (currentStatus && currentStatus.connected) {
+    showToast('Please disconnect from your current network first', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('createBtn');
+  if (!btn) return;
+
+  btn.disabled = true;
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-activity"></use></svg> <span>Creating Mesh...</span>';
+
+  try {
+    const code = await invoke('create_room');
+    const codeEl = document.getElementById('generatedCode');
+    if (codeEl) codeEl.textContent = code;
+
+    const infoEl = document.getElementById('roomCreatedInfo');
+    if (infoEl) infoEl.classList.remove('hidden');
+
+    btn.innerHTML = '<svg class="icon icon-sm" style="color: var(--status-connected);"><use href="#icon-check"></use></svg> <span>Network Created</span>';
+    showToast('Mesh network created successfully', 'success');
+    await refreshStatus(true);
+  } catch (e) {
+    showToast('Failed to create network: ' + e, 'error');
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+// ── Join Room Action ──
 async function joinRoom() {
-  const code = document.getElementById('joinCodeInput').value.trim();
-  if (!code) { showToast('Enter an invite code', 'error'); return; }
+  if (currentStatus && currentStatus.connected) {
+    showToast('Please disconnect from your current network first', 'error');
+    return;
+  }
+
+  const input = document.getElementById('joinCodeInput');
+  const code = input ? input.value.trim() : '';
+  if (!code) {
+    showToast('Please paste a valid room invite token', 'error');
+    if (input) input.focus();
+    return;
+  }
 
   const btn = document.getElementById('joinBtn');
   const status = document.getElementById('joinStatus');
+  if (!btn || !status) return;
+
   btn.disabled = true;
-  btn.textContent = 'Joining...';
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-activity"></use></svg> <span>Connecting...</span>';
   status.classList.add('hidden');
 
   try {
     const ip = await invoke('join_room', { code });
-    status.textContent = `Connected! Your IP: ${ip}`;
+    status.innerHTML = `<svg class="icon icon-sm"><use href="#icon-check"></use></svg> <span>Connected to virtual LAN! Allocated IP: <strong>${escapeHtml(ip)}</strong></span>`;
     status.className = 'status-message success';
-    btn.textContent = '✅ Joined';
-    showToast('Joined room ' + code, 'success');
-    refreshStatus();
-    setTimeout(() => showPage('dashboard'), 1000);
+    status.classList.remove('hidden');
+
+    btn.innerHTML = '<svg class="icon icon-sm"><use href="#icon-check"></use></svg> <span>Connected</span>';
+    showToast(`Connected with Virtual IP ${ip}`, 'success');
+    await refreshStatus(true);
+
+    setTimeout(() => {
+      showPage('dashboard');
+    }, 800);
   } catch (e) {
-    status.textContent = 'Failed: ' + e;
+    status.innerHTML = `<svg class="icon icon-sm"><use href="#icon-alert"></use></svg> <span>Connection failed: ${escapeHtml(e)}</span>`;
     status.className = 'status-message error';
+    status.classList.remove('hidden');
+
     btn.disabled = false;
-    btn.textContent = 'Join';
+    btn.innerHTML = originalHtml;
   }
 }
 
-// ── Leave Room ──
+// ── Leave Room Action ──
 async function leaveRoom() {
   try {
     await invoke('leave_room');
-    showToast('Left room', 'info');
-    // Reset create page
-    document.getElementById('createBtn').disabled = false;
-    document.getElementById('createBtn').textContent = '⚡ Create Room';
-    document.getElementById('roomCreatedInfo').classList.add('hidden');
-    // Reset join page
-    document.getElementById('joinBtn').disabled = false;
-    document.getElementById('joinBtn').textContent = 'Join';
-    document.getElementById('joinCodeInput').value = '';
-    document.getElementById('joinStatus').classList.add('hidden');
-    refreshStatus();
+    showToast('Disconnected from virtual network', 'info');
+
+    // Reset Create Room Page
+    const createBtn = document.getElementById('createBtn');
+    if (createBtn) {
+      createBtn.disabled = false;
+      createBtn.innerHTML = '<svg class="icon"><use href="#icon-plus"></use></svg> <span>Initialize &amp; Create Network</span>';
+    }
+    const createdInfo = document.getElementById('roomCreatedInfo');
+    if (createdInfo) createdInfo.classList.add('hidden');
+
+    // Reset Join Room Page
+    const joinBtn = document.getElementById('joinBtn');
+    if (joinBtn) {
+      joinBtn.disabled = false;
+      joinBtn.innerHTML = '<svg class="icon icon-sm"><use href="#icon-link"></use></svg> <span>Connect</span>';
+    }
+    const joinInput = document.getElementById('joinCodeInput');
+    if (joinInput) joinInput.value = '';
+    const joinStatus = document.getElementById('joinStatus');
+    if (joinStatus) joinStatus.classList.add('hidden');
+
+    await refreshStatus(true);
   } catch (e) {
-    showToast('Error: ' + e, 'error');
+    showToast('Error leaving network: ' + e, 'error');
   }
 }
 
-// ── Copy Code ──
-function copyCode() {
-  const code = document.getElementById('generatedCode').textContent;
-  navigator.clipboard.writeText(code);
-  showToast('Code copied!', 'success');
-}
-
-// ── Refresh Status ──
-async function refreshStatus() {
+// ── Refresh Status (Synchronous DOM Update) ──
+async function refreshStatus(force = false) {
   try {
     const s = await invoke('get_status');
+    const jsonStr = JSON.stringify(s);
 
-    // Update dashboard cards
-    document.getElementById('statusValue').textContent = s.connected ? '🟢 Connected' : '⚫ Offline';
-    document.getElementById('nodeNameValue').textContent = s.node_name;
-    document.getElementById('virtualIpValue').textContent = s.virtual_ip || '—';
-    document.getElementById('roomCodeValue').textContent = s.room_code || '—';
+    if (!force && jsonStr === lastStatusJson) {
+      return;
+    }
+    lastStatusJson = jsonStr;
+    currentStatus = s;
 
-    // Connection indicator
-    const dot = document.getElementById('connectionDot');
-    const txt = document.getElementById('connectionText');
-    dot.className = s.connected ? 'status-indicator connected' : 'status-indicator';
-    txt.textContent = s.connected ? 'Connected' : 'Disconnected';
+    // Sidebar Node Name & Connection Status
+    const sidebarNode = document.getElementById('sidebarNodeName');
+    if (sidebarNode) sidebarNode.textContent = s.node_name || 'Local Node';
 
-    // Settings page
-    document.getElementById('settingsNodeName').textContent = s.node_name;
-    document.getElementById('settingsPublicKey').textContent = s.public_key;
+    const connDot = document.getElementById('connectionDot');
+    const connTxt = document.getElementById('connectionText');
+    if (connDot && connTxt) {
+      if (s.connected) {
+        connDot.className = 'status-badge connected';
+        connTxt.textContent = 'Connected';
+      } else {
+        connDot.className = 'status-badge';
+        connTxt.textContent = 'Standby';
+      }
+    }
 
-    // Active room section
-    if (s.connected && s.peers.length > 0) {
-      document.getElementById('activeRoomSection').classList.remove('hidden');
-      document.getElementById('noRoomSection').classList.add('hidden');
-      renderPeers(s.peers);
+    const sidebarIp = document.getElementById('sidebarIpPreview');
+    if (sidebarIp) {
+      sidebarIp.textContent = s.virtual_ip || '10.7.0.0/24';
+    }
+
+    // Dashboard Header Subhead
+    const subhead = document.getElementById('dashboardSubhead');
+    if (subhead) {
+      if (s.connected) {
+        subhead.textContent = `Connected to virtual network (${s.peers.length} ${s.peers.length === 1 ? 'node' : 'nodes'} active)`;
+      } else {
+        subhead.textContent = 'Virtual LAN status and mesh topology details';
+      }
+    }
+
+    // Dashboard Top Header Quick Actions
+    const headerActions = document.getElementById('dashboardHeaderActions');
+    if (headerActions) {
+      if (s.connected) {
+        headerActions.innerHTML = `
+          <button class="btn btn-secondary btn-sm" id="quickCopyInviteBtn">
+            <svg class="icon icon-sm"><use href="#icon-copy"></use></svg>
+            <span>Copy Invite</span>
+          </button>
+          <button class="btn btn-danger btn-sm" id="quickLeaveBtn">
+            <svg class="icon icon-sm"><use href="#icon-power"></use></svg>
+            <span>Disconnect</span>
+          </button>
+        `;
+        const qCopy = document.getElementById('quickCopyInviteBtn');
+        if (qCopy) qCopy.addEventListener('click', function() {
+          if (s.room_code) copyToClipboard(s.room_code, 'Invite code copied to clipboard', this);
+        });
+        const qLeave = document.getElementById('quickLeaveBtn');
+        if (qLeave) qLeave.addEventListener('click', leaveRoom);
+      } else {
+        headerActions.innerHTML = `
+          <button class="btn btn-secondary btn-sm" id="quickJoinBtn">
+            <svg class="icon icon-sm"><use href="#icon-link"></use></svg>
+            <span>Join</span>
+          </button>
+          <button class="btn btn-primary btn-sm" id="quickCreateBtn">
+            <svg class="icon icon-sm"><use href="#icon-plus"></use></svg>
+            <span>Create Network</span>
+          </button>
+        `;
+        const qJoin = document.getElementById('quickJoinBtn');
+        if (qJoin) qJoin.addEventListener('click', () => showPage('join'));
+        const qCreate = document.getElementById('quickCreateBtn');
+        if (qCreate) qCreate.addEventListener('click', () => showPage('create'));
+      }
+    }
+
+    // Dashboard Interface Summary Metrics
+    const summaryStatus = document.getElementById('summaryStatusBadge');
+    const statusVal = document.getElementById('statusValue');
+    if (summaryStatus && statusVal) {
+      if (s.connected) {
+        summaryStatus.className = 'status-badge connected';
+        statusVal.textContent = 'Connected';
+      } else {
+        summaryStatus.className = 'status-badge';
+        statusVal.textContent = 'Standby';
+      }
+    }
+
+    const nodeNameVal = document.getElementById('nodeNameValue');
+    if (nodeNameVal) nodeNameVal.textContent = s.node_name || '—';
+
+    const virtualIpVal = document.getElementById('virtualIpValue');
+    if (virtualIpVal) virtualIpVal.textContent = s.virtual_ip || '—';
+
+    const roomCodeVal = document.getElementById('roomCodeValue');
+    if (roomCodeVal) {
+      if (s.room_code) {
+        roomCodeVal.textContent = s.room_code.length > 16 
+          ? s.room_code.substring(0, 10) + '...' + s.room_code.slice(-6)
+          : s.room_code;
+        roomCodeVal.title = s.room_code;
+      } else {
+        roomCodeVal.textContent = '—';
+        roomCodeVal.title = '';
+      }
+    }
+
+    // Settings Page Fields
+    const settingsNode = document.getElementById('settingsNodeName');
+    if (settingsNode) settingsNode.textContent = s.node_name || '—';
+
+    const settingsPk = document.getElementById('settingsPublicKey');
+    if (settingsPk) {
+      settingsPk.textContent = s.public_key || '—';
+      settingsPk.title = s.public_key || '';
+    }
+
+    // Create Room & Join Room Notice State
+    const createNotice = document.getElementById('createConnectedNotice');
+    const createBtn = document.getElementById('createBtn');
+    if (createNotice && createBtn) {
+      if (s.connected) {
+        createNotice.classList.remove('hidden');
+        createBtn.disabled = true;
+        createBtn.title = 'Disconnect from current network to create a new one';
+      } else {
+        createNotice.classList.add('hidden');
+        createBtn.disabled = false;
+        createBtn.title = '';
+      }
+    }
+
+    const joinNotice = document.getElementById('joinConnectedNotice');
+    const joinBtn = document.getElementById('joinBtn');
+    if (joinNotice && joinBtn) {
+      if (s.connected) {
+        joinNotice.classList.remove('hidden');
+        joinBtn.disabled = true;
+        joinBtn.title = 'Disconnect from current network to join another';
+      } else {
+        joinNotice.classList.add('hidden');
+        joinBtn.disabled = false;
+        joinBtn.title = '';
+      }
+    }
+
+    // Active Room vs Standby Section
+    const activeSection = document.getElementById('activeRoomSection');
+    const noRoomSection = document.getElementById('noRoomSection');
+    const peerCountBadge = document.getElementById('peerCountBadge');
+
+    if (s.connected) {
+      if (activeSection) activeSection.classList.remove('hidden');
+      if (noRoomSection) noRoomSection.classList.add('hidden');
+      if (peerCountBadge) {
+        peerCountBadge.textContent = `${s.peers.length} active`;
+      }
+      renderPeers(s.peers, s.node_name, s.virtual_ip);
     } else {
-      document.getElementById('activeRoomSection').classList.add('hidden');
-      document.getElementById('noRoomSection').classList.remove('hidden');
+      if (activeSection) activeSection.classList.add('hidden');
+      if (noRoomSection) noRoomSection.classList.remove('hidden');
     }
   } catch (e) {
-    console.error('Status refresh failed:', e);
+    console.error('Status refresh error:', e);
   }
 }
 
-// ── Render Peers ──
-function renderPeers(peers) {
-  const list = document.getElementById('peerList');
-  list.innerHTML = peers.map(p => `
-    <div class="peer-card">
-      <div class="peer-status ${p.connected ? 'online' : 'offline'}"></div>
-      <div class="peer-info">
-        <div class="peer-name">${escapeHtml(p.node_name)}</div>
-        <div class="peer-ip">${escapeHtml(p.virtual_ip)}</div>
-      </div>
-      <div class="peer-latency">${p.latency_ms != null ? escapeHtml(p.latency_ms.toFixed(1)) + ' ms' : '—'}</div>
-    </div>
-  `).join('');
+// ── Render Peer Table ──
+function renderPeers(peers, localNodeName, localVirtualIp) {
+  const tbody = document.getElementById('peerList');
+  if (!tbody) return;
+
+  if (!peers || peers.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">
+          Waiting for peers to join this network session...
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = peers.map(p => {
+    const isSelf = p.node_name === localNodeName || p.virtual_ip === localVirtualIp;
+    const isHost = p.virtual_ip === '10.7.0.1';
+
+    let latencyHtml = '<span class="peer-latency-badge text-muted">—</span>';
+    if (p.latency_ms != null) {
+      const lat = p.latency_ms;
+      let latencyClass = 'good';
+      if (lat > 80) latencyClass = 'moderate';
+      if (lat > 150) latencyClass = 'text-muted';
+      latencyHtml = `
+        <span class="peer-latency-badge ${latencyClass}">
+          <svg class="icon icon-sm"><use href="#icon-activity"></use></svg>
+          <span>${lat.toFixed(1)} ms</span>
+        </span>
+      `;
+    }
+
+    return `
+      <tr>
+        <td>
+          <div class="peer-node-cell">
+            <span class="peer-status-dot ${p.connected ? 'online' : ''}" title="${p.connected ? 'Connected' : 'Offline'}"></span>
+            <div class="peer-node-details">
+              <span class="peer-node-name">
+                ${escapeHtml(p.node_name)}
+                ${isSelf ? '<span class="peer-tag">This Device</span>' : ''}
+                ${isHost && !isSelf ? '<span class="peer-tag" style="background: var(--bg-surface-elevated); color: var(--text-secondary); border-color: var(--border-subtle);">Host</span>' : ''}
+              </span>
+            </div>
+          </div>
+        </td>
+        <td>
+          <button class="peer-ip-badge" onclick="copyToClipboard('${escapeHtml(p.virtual_ip)}', 'Virtual IP copied', this)" title="Click to copy IP">
+            <span>${escapeHtml(p.virtual_ip)}</span>
+            <svg class="icon icon-sm"><use href="#icon-copy"></use></svg>
+          </button>
+        </td>
+        <td>
+          <span class="peer-protocol-badge">WireGuard P2P</span>
+        </td>
+        <td>
+          ${latencyHtml}
+        </td>
+        <td style="text-align: right;">
+          <button class="btn-icon" onclick="copyToClipboard('${escapeHtml(p.virtual_ip)}', 'IP copied', this)" title="Copy Virtual IP">
+            <svg class="icon icon-sm"><use href="#icon-copy"></use></svg>
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join('');
 }
 
+// ── HTML Escape Utility ──
 function escapeHtml(s) {
   if (s == null) return '';
   return String(s)
@@ -168,32 +452,128 @@ function escapeHtml(s) {
     .replace(/'/g, '&#039;');
 }
 
-// ── Init ──
+// ── Initialize Event Listeners ──
 window.addEventListener('DOMContentLoaded', () => {
-  // Bind events
+  // Navigation tabs
   document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => showPage(btn.getAttribute('data-page')));
+    btn.addEventListener('click', () => {
+      const page = btn.getAttribute('data-page');
+      if (page) showPage(page);
+    });
   });
-  
+
+  // Standby Action Buttons
+  const standbyCreateBtn = document.getElementById('standbyCreateBtn');
+  if (standbyCreateBtn) standbyCreateBtn.addEventListener('click', () => showPage('create'));
+
+  const standbyJoinBtn = document.getElementById('standbyJoinBtn');
+  if (standbyJoinBtn) standbyJoinBtn.addEventListener('click', () => showPage('join'));
+
+  const goToDashboardAfterCreate = document.getElementById('goToDashboardAfterCreate');
+  if (goToDashboardAfterCreate) goToDashboardAfterCreate.addEventListener('click', () => showPage('dashboard'));
+
+  // Disconnect buttons in Create/Join notices
+  const createDisconnectBtn = document.getElementById('createDisconnectBtn');
+  if (createDisconnectBtn) createDisconnectBtn.addEventListener('click', leaveRoom);
+
+  const joinDisconnectBtn = document.getElementById('joinDisconnectBtn');
+  if (joinDisconnectBtn) joinDisconnectBtn.addEventListener('click', leaveRoom);
+
+  // Create Room
   const createBtn = document.getElementById('createBtn');
   if (createBtn) createBtn.addEventListener('click', createRoom);
-  
+
+  const copyCreatedCodeBtn = document.getElementById('copyCreatedCodeBtn');
+  if (copyCreatedCodeBtn) {
+    copyCreatedCodeBtn.addEventListener('click', function() {
+      const code = document.getElementById('generatedCode').textContent;
+      copyToClipboard(code, 'Invite code copied to clipboard', this);
+    });
+  }
+
+  // Join Room
   const joinBtn = document.getElementById('joinBtn');
   if (joinBtn) joinBtn.addEventListener('click', joinRoom);
-  
-  const leaveBtn = document.querySelector('#activeRoomSection .btn-danger');
-  if (leaveBtn) leaveBtn.addEventListener('click', leaveRoom);
-  
-  const copyBtn = document.querySelector('.invite-code .btn-icon');
-  if (copyBtn) copyBtn.addEventListener('click', copyCode);
-  
-  const createNavBtn = document.querySelector('.empty-actions .btn-primary');
-  if (createNavBtn) createNavBtn.addEventListener('click', () => showPage('create'));
-  
-  const joinNavBtn = document.querySelector('.empty-actions .btn-secondary');
-  if (joinNavBtn) joinNavBtn.addEventListener('click', () => showPage('join'));
 
-  refreshStatus();
-  // Refresh status every 3 seconds
-  setInterval(refreshStatus, 3000);
+  const joinInput = document.getElementById('joinCodeInput');
+  if (joinInput) {
+    joinInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        joinRoom();
+      }
+    });
+  }
+
+  // Leave Room / Disconnect
+  const leaveRoomBtn = document.getElementById('leaveRoomBtn');
+  if (leaveRoomBtn) leaveRoomBtn.addEventListener('click', leaveRoom);
+
+  // Copy Room Code / Invite
+  const copyRoomCodeBtn = document.getElementById('copyRoomCodeBtn');
+  if (copyRoomCodeBtn) {
+    copyRoomCodeBtn.addEventListener('click', function() {
+      if (currentStatus && currentStatus.room_code) {
+        copyToClipboard(currentStatus.room_code, 'Mesh room token copied', this);
+      }
+    });
+  }
+
+  const shareRoomBtn = document.getElementById('shareRoomBtn');
+  if (shareRoomBtn) {
+    shareRoomBtn.addEventListener('click', function() {
+      if (currentStatus && currentStatus.room_code) {
+        copyToClipboard(currentStatus.room_code, 'Invite code copied to clipboard', this);
+      }
+    });
+  }
+
+  // Copy Node Name
+  const copyNodeNameBtn = document.getElementById('copyNodeNameBtn');
+  if (copyNodeNameBtn) {
+    copyNodeNameBtn.addEventListener('click', function() {
+      if (currentStatus && currentStatus.node_name) {
+        copyToClipboard(currentStatus.node_name, 'Node name copied', this);
+      }
+    });
+  }
+
+  // Copy Virtual IP
+  const copyVirtualIpBtn = document.getElementById('copyVirtualIpBtn');
+  if (copyVirtualIpBtn) {
+    copyVirtualIpBtn.addEventListener('click', function() {
+      if (currentStatus && currentStatus.virtual_ip) {
+        copyToClipboard(currentStatus.virtual_ip, 'Virtual IP copied', this);
+      }
+    });
+  }
+
+  // Copy Settings Public Key
+  const copySettingsPublicKeyBtn = document.getElementById('copySettingsPublicKeyBtn');
+  if (copySettingsPublicKeyBtn) {
+    copySettingsPublicKeyBtn.addEventListener('click', function() {
+      if (currentStatus && currentStatus.public_key) {
+        copyToClipboard(currentStatus.public_key, 'Public key copied to clipboard', this);
+      }
+    });
+  }
+
+  // Copy Diagnostics
+  const copyDiagnosticsBtn = document.getElementById('copyDiagnosticsBtn');
+  if (copyDiagnosticsBtn) {
+    copyDiagnosticsBtn.addEventListener('click', function() {
+      if (currentStatus) {
+        const diag = {
+          client: 'Elysium v0.1.0-alpha',
+          timestamp: new Date().toISOString(),
+          status: currentStatus,
+          userAgent: navigator.userAgent
+        };
+        copyToClipboard(JSON.stringify(diag, null, 2), 'Diagnostics JSON copied', this);
+      }
+    });
+  }
+
+  // Initial status query and recurring interval (2.5s)
+  refreshStatus(true);
+  setInterval(() => refreshStatus(false), 2500);
 });
