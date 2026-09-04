@@ -4,21 +4,21 @@ use tracing::{info, warn};
 
 #[cfg(windows)]
 #[link(name = "winmm")]
-extern "system" {
+unsafe extern "system" {
     fn timeBeginPeriod(uPeriod: u32) -> u32;
     fn timeEndPeriod(uPeriod: u32) -> u32;
 }
 
 #[cfg(windows)]
 #[link(name = "avrt")]
-extern "system" {
+unsafe extern "system" {
     fn AvSetMmThreadCharacteristicsW(TaskName: *const u16, TaskIndex: *mut u32) -> *mut std::ffi::c_void;
     fn AvRevertMmThreadCharacteristics(AvrtHandle: *mut std::ffi::c_void) -> i32;
 }
 
 #[cfg(windows)]
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn GetCurrentThread() -> *mut std::ffi::c_void;
     fn SetThreadPriority(hThread: *mut std::ffi::c_void, nPriority: i32) -> i32;
 }

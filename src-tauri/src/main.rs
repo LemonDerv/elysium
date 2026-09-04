@@ -370,7 +370,7 @@ fn main() {
     }
 
     // Apply OS-level gaming optimizations (MMCSS "Games" scheduling, 1ms timer resolution, DSCP 46 NetQoS)
-    crate::network::windows_tuning::WindowsGamingTuner::apply_system_optimizations("elysium.exe");
+    let _ = crate::network::windows_tuning::WindowsGamingTuner::apply_system_optimizations("elysium.exe");
 
     // Initialize logging
     tracing_subscriber::fmt()
