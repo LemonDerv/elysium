@@ -20,24 +20,35 @@ async function invoke(cmd, args = {}) {
   return await fn(cmd, args);
 }
 
-// ── State Cache ──
+// ── State Cache & Concurrency Locks ──
 let lastStatusJson = null;
 let currentStatus = null;
 let toastTimeout = null;
+let isStatusRefreshing = false;
+let isCreating = false;
+let isJoining = false;
+let isLeaving = false;
+let lastConnectedState = null;
 
 // ── Page Navigation ──
 function showPage(name) {
+  const targetPage = document.getElementById('page-' + name);
+  if (!targetPage) {
+    console.warn(`Attempted to navigate to nonexistent page: page-${name}`);
+    return;
+  }
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   
-  const targetPage = document.getElementById('page-' + name);
-  if (targetPage) {
-    targetPage.classList.add('active');
-  }
+  targetPage.classList.add('active');
   
   const navBtn = document.querySelector(`.nav-btn[data-page="${name}"]`);
   if (navBtn) {
     navBtn.classList.add('active');
+  }
+
+  if (name === 'join') {
+    loadKnownRooms();
   }
 }
 
@@ -67,17 +78,27 @@ function showToast(msg, type = 'info') {
   }, 3500);
 }
 
-// ── Clipboard Copy Helper with Visual Feedback ──
+// ── Clipboard Copy Helper with Visual Feedback & Re-entrancy Protection ──
 function copyToClipboard(text, successMsg = 'Copied to clipboard', btnEl = null) {
   if (!text || text === '—') return;
+  if (btnEl && btnEl.classList.contains('btn-copied')) return;
+
+  if (!navigator.clipboard?.writeText) {
+    showToast('Clipboard API unavailable', 'error');
+    return;
+  }
+
   navigator.clipboard.writeText(text).then(() => {
     showToast(successMsg, 'success');
     if (btnEl) {
-      const originalHtml = btnEl.innerHTML;
+      const originalHtml = btnEl.dataset.originalHtml || btnEl.innerHTML;
+      btnEl.dataset.originalHtml = originalHtml;
       btnEl.classList.add('btn-copied');
       btnEl.innerHTML = '<svg class="icon icon-sm" style="color: var(--status-connected);"><use href="#icon-check"></use></svg>';
       setTimeout(() => {
-        btnEl.innerHTML = originalHtml;
+        if (btnEl.dataset.originalHtml) {
+          btnEl.innerHTML = btnEl.dataset.originalHtml;
+        }
         btnEl.classList.remove('btn-copied');
       }, 1500);
     }
@@ -87,8 +108,45 @@ function copyToClipboard(text, successMsg = 'Copied to clipboard', btnEl = null)
   });
 }
 
+// ── Load Previously Known Rooms from Config ──
+async function loadKnownRooms() {
+  try {
+    const rooms = await invoke('get_known_rooms');
+    const container = document.getElementById('knownRoomsContainer');
+    const list = document.getElementById('knownRoomsList');
+    if (!container || !list) return;
+
+    if (Array.isArray(rooms) && rooms.length > 0) {
+      list.innerHTML = rooms.map(r => `
+        <div class="known-room-item" data-code="${escapeHtml(r)}" title="Click to use this room token">
+          <span class="known-room-code">${escapeHtml(r)}</span>
+          <span class="badge-tag mono" style="font-size: 10px;">Select</span>
+        </div>
+      `).join('');
+      container.classList.remove('hidden');
+
+      list.querySelectorAll('.known-room-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const code = item.getAttribute('data-code');
+          const input = document.getElementById('joinCodeInput');
+          if (input && code) {
+            input.value = code;
+            input.focus();
+            showToast('Room token loaded into input', 'info');
+          }
+        });
+      });
+    } else {
+      container.classList.add('hidden');
+    }
+  } catch (e) {
+    console.debug('Could not load known rooms:', e);
+  }
+}
+
 // ── Create Room Action ──
 async function createRoom() {
+  if (isCreating) return;
   if (currentStatus && currentStatus.connected) {
     showToast('Please disconnect from your current network first', 'error');
     return;
@@ -97,9 +155,10 @@ async function createRoom() {
   const btn = document.getElementById('createBtn');
   if (!btn) return;
 
+  isCreating = true;
   btn.disabled = true;
   const originalHtml = btn.innerHTML;
-  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-activity"></use></svg> <span>Creating Mesh...</span>';
+  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-loader"></use></svg> <span>Creating Mesh...</span>';
 
   try {
     const code = await invoke('create_room');
@@ -116,18 +175,21 @@ async function createRoom() {
     showToast('Failed to create network: ' + e, 'error');
     btn.disabled = false;
     btn.innerHTML = originalHtml;
+  } finally {
+    isCreating = false;
   }
 }
 
 // ── Join Room Action ──
 async function joinRoom() {
+  if (isJoining) return;
   if (currentStatus && currentStatus.connected) {
     showToast('Please disconnect from your current network first', 'error');
     return;
   }
 
   const input = document.getElementById('joinCodeInput');
-  const code = input ? input.value.trim() : '';
+  const code = input ? input.value.replace(/\s+/g, '') : '';
   if (!code) {
     showToast('Please paste a valid room invite token', 'error');
     if (input) input.focus();
@@ -138,9 +200,11 @@ async function joinRoom() {
   const status = document.getElementById('joinStatus');
   if (!btn || !status) return;
 
+  isJoining = true;
   btn.disabled = true;
+  if (input) input.disabled = true;
   const originalHtml = btn.innerHTML;
-  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-activity"></use></svg> <span>Connecting...</span>';
+  btn.innerHTML = '<svg class="icon icon-sm" style="animation: spin 1s linear infinite;"><use href="#icon-loader"></use></svg> <span>Connecting...</span>';
   status.classList.add('hidden');
 
   try {
@@ -163,11 +227,16 @@ async function joinRoom() {
 
     btn.disabled = false;
     btn.innerHTML = originalHtml;
+  } finally {
+    isJoining = false;
+    if (input) input.disabled = false;
   }
 }
 
 // ── Leave Room Action ──
 async function leaveRoom() {
+  if (isLeaving) return;
+  isLeaving = true;
   try {
     await invoke('leave_room');
     showToast('Disconnected from virtual network', 'info');
@@ -192,14 +261,25 @@ async function leaveRoom() {
     const joinStatus = document.getElementById('joinStatus');
     if (joinStatus) joinStatus.classList.add('hidden');
 
+    // Clear peer table
+    const tbody = document.getElementById('peerList');
+    if (tbody) tbody.innerHTML = '';
+    const badge = document.getElementById('peerCountBadge');
+    if (badge) badge.textContent = '0 active';
+
     await refreshStatus(true);
   } catch (e) {
     showToast('Error leaving network: ' + e, 'error');
+  } finally {
+    isLeaving = false;
   }
 }
 
 // ── Refresh Status (Synchronous DOM Update) ──
 async function refreshStatus(force = false) {
+  if (isStatusRefreshing && !force) return;
+  isStatusRefreshing = true;
+
   try {
     const s = await invoke('get_status');
     const jsonStr = JSON.stringify(s);
@@ -241,9 +321,10 @@ async function refreshStatus(force = false) {
       }
     }
 
-    // Dashboard Top Header Quick Actions
+    // Dashboard Top Header Quick Actions (only rebuild when connection state toggles to prevent dropping user clicks)
     const headerActions = document.getElementById('dashboardHeaderActions');
-    if (headerActions) {
+    if (headerActions && (lastConnectedState !== s.connected || force)) {
+      lastConnectedState = s.connected;
       if (s.connected) {
         headerActions.innerHTML = `
           <button class="btn btn-secondary btn-sm" id="quickCopyInviteBtn">
@@ -365,9 +446,14 @@ async function refreshStatus(force = false) {
     } else {
       if (activeSection) activeSection.classList.add('hidden');
       if (noRoomSection) noRoomSection.classList.remove('hidden');
+      const tbody = document.getElementById('peerList');
+      if (tbody) tbody.innerHTML = '';
+      if (peerCountBadge) peerCountBadge.textContent = '0 active';
     }
   } catch (e) {
     console.error('Status refresh error:', e);
+  } finally {
+    isStatusRefreshing = false;
   }
 }
 
@@ -388,7 +474,8 @@ function renderPeers(peers, localNodeName, localVirtualIp) {
   }
 
   tbody.innerHTML = peers.map(p => {
-    const isSelf = p.node_name === localNodeName || p.virtual_ip === localVirtualIp;
+    // Precise self-identification based on cryptographic IP allocation
+    const isSelf = Boolean(localVirtualIp && p.virtual_ip === localVirtualIp);
     const isHost = p.virtual_ip === '10.7.0.1';
 
     let latencyHtml = '<span class="peer-latency-badge text-muted">—</span>';
@@ -397,21 +484,43 @@ function renderPeers(peers, localNodeName, localVirtualIp) {
       let latencyClass = 'good';
       if (lat > 80) latencyClass = 'moderate';
       if (lat > 150) latencyClass = 'text-muted';
+
+      const jitterVal = p.jitter_ms != null ? p.jitter_ms : 0.0;
+      const lossVal = p.packet_loss_pct != null ? p.packet_loss_pct : 0.0;
+      const hasLoss = lossVal > 0.0;
+
       latencyHtml = `
-        <span class="peer-latency-badge ${latencyClass}">
-          <svg class="icon icon-sm"><use href="#icon-activity"></use></svg>
-          <span>${lat.toFixed(1)} ms</span>
-        </span>
+        <div class="peer-latency-metrics">
+          <span class="peer-latency-badge ${latencyClass}" title="RTT: ${lat.toFixed(1)}ms | Jitter: ${jitterVal.toFixed(2)}ms | Loss: ${lossVal.toFixed(1)}%">
+            <svg class="icon icon-sm"><use href="#icon-activity"></use></svg>
+            <span>${lat.toFixed(1)} ms</span>
+          </span>
+          <span class="peer-jitter-subtext ${hasLoss ? 'has-loss' : ''}">
+            ±${jitterVal.toFixed(1)}ms jitter${lossVal > 0 ? ` · ${lossVal.toFixed(0)}% loss` : ''}
+          </span>
+        </div>
       `;
     }
 
+    let protocolLabel = 'WireGuard P2P';
+    if (!isSelf) {
+      if (localVirtualIp === '10.7.0.1') {
+        protocolLabel = 'Direct Mesh';
+      } else if (isHost) {
+        protocolLabel = 'Direct Gateway';
+      } else {
+        protocolLabel = 'Relayed (Mesh)';
+      }
+    }
+
+    // CSP-compliant: Uses data-ip attribute instead of inline onclick handlers
     return `
       <tr>
         <td>
           <div class="peer-node-cell">
             <span class="peer-status-dot ${p.connected ? 'online' : ''}" title="${p.connected ? 'Connected' : 'Offline'}"></span>
             <div class="peer-node-details">
-              <span class="peer-node-name">
+              <span class="peer-node-name" title="${escapeHtml(p.node_name)}">
                 ${escapeHtml(p.node_name)}
                 ${isSelf ? '<span class="peer-tag">This Device</span>' : ''}
                 ${isHost && !isSelf ? '<span class="peer-tag" style="background: var(--bg-surface-elevated); color: var(--text-secondary); border-color: var(--border-subtle);">Host</span>' : ''}
@@ -420,19 +529,19 @@ function renderPeers(peers, localNodeName, localVirtualIp) {
           </div>
         </td>
         <td>
-          <button class="peer-ip-badge" onclick="copyToClipboard('${escapeHtml(p.virtual_ip)}', 'Virtual IP copied', this)" title="Click to copy IP">
+          <button class="peer-ip-badge copy-peer-ip" data-ip="${escapeHtml(p.virtual_ip)}" title="Click to copy IP">
             <span>${escapeHtml(p.virtual_ip)}</span>
             <svg class="icon icon-sm"><use href="#icon-copy"></use></svg>
           </button>
         </td>
         <td>
-          <span class="peer-protocol-badge">WireGuard P2P</span>
+          <span class="peer-protocol-badge">${protocolLabel}</span>
         </td>
         <td>
           ${latencyHtml}
         </td>
         <td style="text-align: right;">
-          <button class="btn-icon" onclick="copyToClipboard('${escapeHtml(p.virtual_ip)}', 'IP copied', this)" title="Copy Virtual IP">
+          <button class="btn-icon copy-peer-ip" data-ip="${escapeHtml(p.virtual_ip)}" title="Copy Virtual IP">
             <svg class="icon icon-sm"><use href="#icon-copy"></use></svg>
           </button>
         </td>
@@ -461,6 +570,32 @@ window.addEventListener('DOMContentLoaded', () => {
       if (page) showPage(page);
     });
   });
+
+  // Delegated click listener for peer list (Complies with strict CSP: no inline onclick)
+  const peerList = document.getElementById('peerList');
+  if (peerList) {
+    peerList.addEventListener('click', (e) => {
+      const btn = e.target.closest('.copy-peer-ip');
+      if (btn && btn.dataset.ip) {
+        copyToClipboard(btn.dataset.ip, 'Virtual IP copied to clipboard', btn);
+      }
+    });
+  }
+
+  // Delegated click listener for header action buttons
+  const headerActions = document.getElementById('dashboardHeaderActions');
+  if (headerActions) {
+    headerActions.addEventListener('click', (e) => {
+      if (e.target.closest('#quickJoinBtn')) showPage('join');
+      else if (e.target.closest('#quickCreateBtn')) showPage('create');
+      else if (e.target.closest('#quickLeaveBtn')) leaveRoom();
+      else if (e.target.closest('#quickCopyInviteBtn')) {
+        if (currentStatus?.room_code) {
+          copyToClipboard(currentStatus.room_code, 'Invite code copied to clipboard', e.target.closest('#quickCopyInviteBtn'));
+        }
+      }
+    });
+  }
 
   // Standby Action Buttons
   const standbyCreateBtn = document.getElementById('standbyCreateBtn');
@@ -573,7 +708,8 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Initial status query and recurring interval (2.5s)
+  // Initial queries and status refresh loop
   refreshStatus(true);
+  loadKnownRooms();
   setInterval(() => refreshStatus(false), 2500);
 });

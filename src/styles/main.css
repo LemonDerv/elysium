@@ -29,9 +29,9 @@
   --status-connected-bg: rgba(16, 185, 129, 0.1);
   --status-connected-border: rgba(16, 185, 129, 0.25);
 
-  --status-offline: #64748b;
-  --status-offline-bg: rgba(100, 116, 139, 0.1);
-  --status-offline-border: rgba(100, 116, 139, 0.25);
+  --status-offline: #7e90a6;
+  --status-offline-bg: rgba(126, 144, 166, 0.1);
+  --status-offline-border: rgba(126, 144, 166, 0.25);
 
   --status-warning: #f59e0b;
   --status-warning-bg: rgba(245, 158, 11, 0.1);
@@ -41,12 +41,13 @@
   --status-danger-hover: #dc2626;
   --status-danger-bg: rgba(239, 68, 68, 0.1);
   --status-danger-border: rgba(239, 68, 68, 0.25);
+  --status-error: #ef4444;
 
   /* Typography */
   --text-primary: #f8fafc;
   --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --text-dim: #475569;
+  --text-muted: #8496ae;
+  --text-dim: #647894;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
@@ -151,6 +152,8 @@ body {
   height: 100vh;
   padding: var(--space-4) var(--space-3);
   z-index: 10;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .brand {
@@ -573,6 +576,10 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .peer-tag {
@@ -583,6 +590,7 @@ body {
   background: var(--accent-subtle);
   color: var(--accent-hover);
   border: 1px solid var(--accent-border);
+  flex-shrink: 0;
 }
 
 .peer-ip-badge {
@@ -616,6 +624,8 @@ body {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 .peer-latency-badge.good {
@@ -624,6 +634,28 @@ body {
 
 .peer-latency-badge.moderate {
   color: var(--status-warning);
+}
+
+.peer-latency-badge.text-muted {
+  color: var(--text-muted);
+}
+
+.peer-latency-metrics {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.peer-jitter-subtext {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.peer-jitter-subtext.has-loss {
+  color: var(--status-danger);
 }
 
 .peer-protocol-badge {
@@ -853,6 +885,10 @@ body {
   color: #ffffff;
 }
 
+.btn-danger:active:not(:disabled) {
+  background: var(--status-danger-hover);
+}
+
 .btn-sm {
   padding: 5px 10px;
   font-size: 11px;
@@ -876,6 +912,28 @@ body {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
   border-color: var(--border-hover);
+}
+
+.btn-icon:active:not(:disabled) {
+  background: var(--bg-surface-active);
+  transform: scale(0.96);
+}
+
+.btn-icon:focus-visible,
+.peer-ip-badge:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.nav-btn:active {
+  background: var(--bg-surface-active);
+}
+
+.btn-copied,
+.btn-icon.btn-copied {
+  border-color: var(--status-connected-border) !important;
+  background: var(--status-connected-bg) !important;
+  color: var(--status-connected) !important;
 }
 
 /* ── Code / Token Box (Create Room View) ── */
@@ -1104,6 +1162,7 @@ body {
 }
 
 .toast.hidden {
+  display: flex !important;
   opacity: 0;
   transform: translateY(6px);
   pointer-events: none;
@@ -1166,3 +1225,83 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-hover);
 }
+
+/* ── Known Rooms List ── */
+.known-rooms-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.known-room-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.known-room-item:hover {
+  background: var(--bg-surface-elevated);
+  border-color: var(--border-hover);
+}
+
+.known-room-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* ── Responsive Window Media Queries (700x500 window support) ── */
+@media (max-width: 768px) {
+  .standby-actions-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .settings-row-value {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .summary-metric:nth-child(2n) {
+    border-right: none;
+  }
+
+  .summary-metric:nth-child(-n+2) {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .peer-table {
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  .peer-table th,
+  .peer-table td {
+    padding: 8px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+

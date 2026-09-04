@@ -16,6 +16,15 @@ pub struct PeerExchangeInfo {
     pub node_name: String,
 }
 
+/// Dynamic control messages exchanged over QUIC streams
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ControlMessage {
+    PeerInfo(PeerExchangeInfo),
+    PeerInfoResponse(PeerExchangeInfo),
+    RosterUpdate { peers: Vec<crate::room::PeerInfo> },
+}
+
 /// Service for room discovery and signaling
 pub struct DiscoveryService;
 
@@ -66,6 +75,16 @@ impl DiscoveryService {
     pub async fn send_peer_info_response(conn: &Connection, our_info: PeerExchangeInfo) -> Result<()> {
         let msg = serde_json::to_vec(&our_info)?;
         PeerManager::send_message(conn, &msg).await?;
+        Ok(())
+    }
+
+    /// Broadcast or send updated room roster to a peer
+    pub async fn send_roster_update(conn: &Connection, peers: &[crate::room::PeerInfo]) -> Result<()> {
+        let msg = ControlMessage::RosterUpdate {
+            peers: peers.to_vec(),
+        };
+        let bytes = serde_json::to_vec(&msg)?;
+        PeerManager::send_message(conn, &bytes).await?;
         Ok(())
     }
 }

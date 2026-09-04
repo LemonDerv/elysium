@@ -17,6 +17,12 @@ pub struct PeerInfo {
     pub node_name: String,
     /// Latency in milliseconds to this peer.
     pub latency_ms: Option<f64>,
+    /// Jitter in milliseconds to this peer (RFC 3550 IPDV).
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    /// Packet loss percentage (0.0 - 100.0) to this peer.
+    #[serde(default)]
+    pub packet_loss_pct: Option<f64>,
     /// Whether the peer is currently considered connected.
     pub connected: bool,
 }
@@ -67,6 +73,8 @@ impl Room {
             virtual_ip: host_ip,
             node_name: host_node_name,
             latency_ms: Some(0.0),
+            jitter_ms: Some(0.0),
+            packet_loss_pct: Some(0.0),
             connected: true,
         };
 
@@ -116,6 +124,8 @@ impl Room {
             virtual_ip: allocated_ip,
             node_name: node_name.clone(),
             latency_ms: None,
+            jitter_ms: None,
+            packet_loss_pct: None,
             connected: true,
         };
 

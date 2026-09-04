@@ -41,6 +41,8 @@ pub struct PeerStatus {
     pub node_name: String,
     pub virtual_ip: String,
     pub latency_ms: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    pub packet_loss_pct: Option<f64>,
     pub connected: bool,
 }
 
@@ -132,10 +134,11 @@ async fn create_room(state: State<'_, AppState>) -> Result<String, String> {
                                             udp_endpoints: vec![],
                                             node_name: host_node_name.clone(),
                                         };
+                                        let peers_roster = room.peers.clone();
                                         drop(rm);
                                         let _ = network::discovery::DiscoveryService::send_peer_info_response(&conn, response).await;
                                         
-                                        // Setup WG tunnel for this peer
+                                        // Setup WG tunnel for this peer (direct peer: is_gateway = false)
                                         let n = ne_clone.lock().await;
                                         if let Some(e) = n.as_ref() {
                                             let decoded = base64::engine::general_purpose::STANDARD.decode(&peer_info.wg_public_key).unwrap();
@@ -144,10 +147,20 @@ async fn create_room(state: State<'_, AppState>) -> Result<String, String> {
                                             let peer_pk = boringtun::x25519::PublicKey::from(bytes);
                                             
                                             let mut wg = e.wg_manager.write().await;
-                                            let _ = wg.create_tunnel(&sk, &peer_pk, ip);
+                                            let _ = wg.create_tunnel(&sk, &peer_pk, ip, false);
                                             drop(wg);
                                             
-                                            e.add_connection(ip, conn).await;
+                                            e.add_connection(ip, conn.clone()).await;
+
+                                            // Broadcast updated room roster to all connected peers
+                                            let c = e.connections.read().await;
+                                            for (_target_ip, target_conn) in c.iter() {
+                                                let target_conn = target_conn.clone();
+                                                let roster = peers_roster.clone();
+                                                tokio::spawn(async move {
+                                                    let _ = network::discovery::DiscoveryService::send_roster_update(&target_conn, &roster).await;
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -206,15 +219,18 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
     // We now have our IP assigned by host
     let ip = response.virtual_ip;
 
-    // Create a local room object
-    let mut room = Room::create_room("host-placeholder".to_string(), "Host".to_string(), &peer_manager.get_addr()).unwrap();
+    // Create a local room object with authoritative host info
+    let mut room = Room::create_room(response.wg_public_key.clone(), response.node_name.clone(), &peer_manager.get_addr())
+        .unwrap_or_else(|_| Room::create_room("host".to_string(), "Host".to_string(), &peer_manager.get_addr()).unwrap());
     room.room_code = code.clone();
     let host_ip = room.peers[0].virtual_ip;
     room.peers.push(room::PeerInfo {
-        public_key: public_key,
+        public_key: public_key.clone(),
         virtual_ip: ip,
-        node_name,
+        node_name: node_name.clone(),
         latency_ms: None,
+        jitter_ms: None,
+        packet_loss_pct: None,
         connected: true,
     });
     rm.set_active_room(room);
@@ -227,10 +243,6 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
     let wg = network::wireguard::WireGuardManager::new(&subnet).map_err(|e| e.to_string())?;
     let engine = network::NetworkEngine::new(tunnel, wg, peer_manager, state.room_manager.clone());
     
-    // Host has a placeholder PK in our local room, but for WG we don't know it.
-    // Wait, the host should send their PK in the response! 
-    // We need to update PeerExchangeInfo and DiscoveryService logic. Let's assume response.wg_public_key is the host's PK.
-    
     let host_pk_decoded = base64::engine::general_purpose::STANDARD.decode(&response.wg_public_key).unwrap();
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&host_pk_decoded);
@@ -238,11 +250,32 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
     
     {
         let mut wg_write = engine.wg_manager.write().await;
-        let _ = wg_write.create_tunnel(&secret_key, &host_pk, host_ip);
+        let _ = wg_write.create_tunnel(&secret_key, &host_pk, host_ip, true);
     }
     
     engine.start().await.map_err(|e| e.to_string())?;
-    engine.add_connection(host_ip, conn).await;
+    engine.add_connection(host_ip, conn.clone()).await;
+
+    // Spawn background task on client to listen for dynamic roster updates from host
+    let conn_roster = conn.clone();
+    let rm_roster = state.room_manager.clone();
+    tokio::spawn(async move {
+        while let Ok((_, mut recv)) = conn_roster.accept_bi().await {
+            if let Ok(msg_bytes) = recv.read_to_end(16384).await {
+                if let Ok(crate::network::discovery::ControlMessage::RosterUpdate { peers }) = serde_json::from_slice(&msg_bytes) {
+                    let valid_peers: Vec<crate::room::PeerInfo> = peers.into_iter().filter(|p| {
+                        p.node_name.len() <= 64 && base64::engine::general_purpose::STANDARD.decode(&p.public_key).map(|d| d.len() == 32).unwrap_or(false)
+                    }).collect();
+
+                    let mut rm = rm_roster.lock().await;
+                    if let Some(room) = rm.get_active_room_mut() {
+                        info!("Received dynamic room roster update: {} peers", valid_peers.len());
+                        room.peers = valid_peers;
+                    }
+                }
+            }
+        }
+    });
 
     let mut ne = state.network_engine.lock().await;
     *ne = Some(engine);
@@ -286,6 +319,8 @@ async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String> {
                 node_name: p.node_name.clone(),
                 virtual_ip: p.virtual_ip.to_string(),
                 latency_ms: p.latency_ms,
+                jitter_ms: p.jitter_ms,
+                packet_loss_pct: p.packet_loss_pct,
                 connected: p.connected,
             })
             .collect();
@@ -333,6 +368,9 @@ fn main() {
             ])
             .status();
     }
+
+    // Apply OS-level gaming optimizations (MMCSS "Games" scheduling, 1ms timer resolution, DSCP 46 NetQoS)
+    crate::network::windows_tuning::WindowsGamingTuner::apply_system_optimizations("elysium.exe");
 
     // Initialize logging
     tracing_subscriber::fmt()
