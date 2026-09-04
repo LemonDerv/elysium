@@ -13,8 +13,21 @@ pub struct PeerManager {
 impl PeerManager {
     /// Initialize iroh endpoint
     pub async fn init() -> Result<Self> {
-        info!("Initializing iroh endpoint");
-        let endpoint = Endpoint::bind(presets::N0).await?;
+        info!("Initializing iroh endpoint with gaming transport tuning");
+        let mut builder = iroh::endpoint::QuicTransportConfig::builder()
+            .keep_alive_interval(std::time::Duration::from_secs(1))
+            .default_path_keep_alive_interval(std::time::Duration::from_secs(1))
+            .datagram_receive_buffer_size(Some(2 * 1024 * 1024))
+            .datagram_send_buffer_size(2 * 1024 * 1024);
+        if let Ok(timeout) = std::time::Duration::from_secs(60).try_into() {
+            builder = builder.max_idle_timeout(Some(timeout));
+        }
+        let transport_config = builder.build();
+
+        let endpoint = Endpoint::builder(presets::N0)
+            .transport_config(transport_config)
+            .bind()
+            .await?;
         endpoint.set_alpns(vec![ALPN.to_vec()]);
         Ok(Self { endpoint })
     }

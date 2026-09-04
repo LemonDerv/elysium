@@ -164,6 +164,13 @@ impl NetworkEngine {
         info!("Stopping NetworkEngine");
         let mut tm = self.tunnel_manager.lock().await;
         tm.shutdown()?;
+        
+        // Explicitly close all QUIC connections so remotes are notified instantly
+        let mut conns = self.connections.write().await;
+        for (ip, conn) in conns.drain() {
+            conn.close(0u32.into(), b"room_closed");
+            tracing::info!("Closed QUIC connection to {}", ip);
+        }
         Ok(())
     }
 
@@ -190,18 +197,31 @@ impl NetworkEngine {
                 return;
             };
 
-            while let Ok(datagram) = conn.read_datagram().await {
+            loop {
+                let datagram = match conn.read_datagram().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::info!("QUIC datagram stream closed for peer {}: {:?}", peer_ip, e);
+                        break;
+                    }
+                };
+
                 if datagram.is_empty() { continue; }
                 
                 // Fast-path: In-band hardware timestamp jitter & latency probe packet processing
                 if datagram.len() == 32 && datagram.starts_with(&[0x45, 0x4C, 0x50, 0x52]) {
                     if datagram[4] == 0x01 {
                         // PROBE_REQ: Return immediate hardware-timestamped response
-                        let probes = probe_engines.read().await;
-                        if let Some(engine) = probes.get(&peer_ip) {
-                            if let Some(resp) = engine.build_probe_response(&datagram) {
-                                let _ = conn.send_datagram(resp.to_vec().into());
+                        let resp = {
+                            let probes = probe_engines.read().await;
+                            if let Some(engine) = probes.get(&peer_ip) {
+                                engine.build_probe_response(&datagram)
+                            } else {
+                                crate::network::jitter_probe::ProbeEngine::new().build_probe_response(&datagram)
                             }
+                        };
+                        if let Some(resp) = resp {
+                            let _ = conn.send_datagram(resp.to_vec().into());
                         }
                         continue;
                     } else if datagram[4] == 0x02 {

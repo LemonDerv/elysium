@@ -93,7 +93,16 @@ impl WindowsGamingTuner {
             app_name
         );
 
-        let status = Command::new(&ps_bin)
+        #[cfg(windows)]
+        use std::os::windows::process::CommandExt;
+        #[cfg(windows)]
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let mut cmd = Command::new(&ps_bin);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let status = cmd
             .args(&["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
             .status();
 

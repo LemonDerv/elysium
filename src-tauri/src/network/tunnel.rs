@@ -57,6 +57,20 @@ pub fn resolve_powershell_path() -> PathBuf {
     PathBuf::from("powershell")
 }
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Creates a std::process::Command configured with CREATE_NO_WINDOW on Windows
+/// to prevent console window popup flashes.
+pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Sets the Windows network category of the adapter to Private so Windows Firewall
 /// does not drop unsolicited game connections and ICMP pings.
 pub fn set_network_category_private(name: &str) -> Result<()> {
@@ -69,7 +83,7 @@ pub fn set_network_category_private(name: &str) -> Result<()> {
 
     let mut last_err = String::new();
     for attempt in 1..=3 {
-        let status = Command::new(&ps_bin)
+        let status = silent_command(&ps_bin)
             .args(&[
                 "-NoProfile",
                 "-NonInteractive",
@@ -113,7 +127,7 @@ pub fn verify_wintun_dll_signature(dll_path: &Path) -> Result<()> {
     let ps_bin = resolve_powershell_path();
     let dll_str = dll_path.to_string_lossy();
 
-    let output = Command::new(&ps_bin)
+    let output = silent_command(&ps_bin)
         .args(&[
             "-NoProfile",
             "-NonInteractive",
@@ -128,25 +142,30 @@ pub fn verify_wintun_dll_signature(dll_path: &Path) -> Result<()> {
         .output()
         .context("Failed to run Authenticode signature check via PowerShell")?;
 
-    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let status_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    info!("wintun.dll Authenticode signature status: '{}'", status_str);
 
-    if status == "Valid" {
-        info!("wintun.dll Authenticode signature verified successfully");
-        Ok(())
-    } else {
-        // In debug builds or non-production environments where official driver signing cert may be absent in local dev,
-        // log a warning instead of hard failing.
-        if cfg!(debug_assertions) {
-            tracing::warn!(
-                "wintun.dll Authenticode signature is '{}' (expected 'Valid'). Proceeding because this is a debug build.",
-                status
-            );
+    match status_str.as_str() {
+        "Valid" => {
+            info!("wintun.dll Authenticode signature verified successfully");
             Ok(())
-        } else {
-            Err(anyhow!(
-                "wintun.dll failed Authenticode verification: status is '{}'. Rejecting untrusted driver binary.",
-                status
-            ))
+        }
+        _ => {
+            #[cfg(debug_assertions)]
+            {
+                tracing::warn!(
+                    "wintun.dll Authenticode signature is '{}' (expected 'Valid'). Proceeding because this is a debug build.",
+                    status_str
+                );
+                Ok(())
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                anyhow::bail!(
+                    "wintun.dll failed Authenticode verification: status is '{}'. Rejecting untrusted driver binary.",
+                    status_str
+                );
+            }
         }
     }
 }
@@ -160,7 +179,7 @@ pub fn harden_elysium_firewall(name: &str) -> Result<()> {
     }
 
     let ps_bin = resolve_powershell_path();
-    info!("Hardening Windows Firewall for virtual adapter '{}'...", name);
+    info!("Hardening Windows Firewall on '{}'...", name);
 
     let script = format!(
         r#"
@@ -175,7 +194,7 @@ pub fn harden_elysium_firewall(name: &str) -> Result<()> {
         name = name
     );
 
-    let status = Command::new(&ps_bin)
+    let status = silent_command(&ps_bin)
         .args(&[
             "-NoProfile",
             "-NonInteractive",
@@ -211,7 +230,7 @@ pub fn cleanup_elysium_firewall() {
         Remove-NetFirewallRule -DisplayName 'ElysiumLAN-Allow-ICMP' -ErrorAction SilentlyContinue
     "#;
 
-    let _ = Command::new(&ps_bin)
+    let _ = silent_command(&ps_bin)
         .args(&[
             "-NoProfile",
             "-NonInteractive",
@@ -269,7 +288,7 @@ impl TunnelManager {
         let netsh_bin = resolve_netsh_path();
         
         // Set the IP address
-        let status = Command::new(&netsh_bin)
+        let status = silent_command(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "set", "address",
                 &format!("name={}", name),
@@ -285,7 +304,7 @@ impl TunnelManager {
         }
         
         // Set high interface metric so Windows doesn't route default internet through this adapter
-        let _ = Command::new(&netsh_bin)
+        let _ = silent_command(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "set", "interface",
                 &format!("interface={}", name),
@@ -294,7 +313,7 @@ impl TunnelManager {
             .status();
 
         // Set MTU to 1380 bytes (RFC 8900 optimization to prevent fragmentation under WireGuard + QUIC encapsulation)
-        let _ = Command::new(&netsh_bin)
+        let _ = silent_command(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "set", "subinterface",
                 &name,
@@ -305,7 +324,7 @@ impl TunnelManager {
 
         // Mitigate TunnelVision (CVE-2024-3661): explicitly bind on-link virtual subnet 10.7.0.0/24
         // to ElysiumLAN with metric 1 so rogue DHCP Option 121 routes on physical interfaces cannot hijack traffic.
-        let _ = Command::new(&netsh_bin)
+        let _ = silent_command(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "add", "route",
                 "10.7.0.0/24",
@@ -318,7 +337,7 @@ impl TunnelManager {
 
         // Route virtual subnet broadcast 10.7.0.255/32 to ElysiumLAN with metric 1 for LAN game discovery
         // NOTE: We deliberately do NOT route 255.255.255.255/32 to prevent hijacking physical LAN discovery.
-        let _ = Command::new(&netsh_bin)
+        let _ = silent_command(&netsh_bin)
             .args(&[
                 "interface", "ipv4", "add", "route",
                 "10.7.0.255/32",
@@ -340,10 +359,21 @@ impl TunnelManager {
 
     /// Starts a thread that reads packets from TUN and sends to channel
     pub async fn start_reading(&mut self, tx: mpsc::Sender<Vec<u8>>) -> Result<()> {
-        let session = Arc::new(
-            self.adapter.start_session(wintun::MAX_RING_CAPACITY)
-                .map_err(|e| anyhow!("Failed to start wintun session: {}", e))?
-        );
+        if let Some(old_session) = self.session.take() {
+            let _ = old_session.shutdown();
+        }
+
+        // Use 4 MiB ring capacity (WireGuard standard). Falls back to MIN_RING_CAPACITY if memory constrained.
+        let ring_capacity = 0x400000; // 4 MiB
+        let session = match self.adapter.start_session(ring_capacity) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::warn!("Failed to start 4MB ring capacity ({:?}), trying MIN_RING_CAPACITY", e);
+                self.adapter.start_session(wintun::MIN_RING_CAPACITY)
+                    .map(Arc::new)
+                    .map_err(|e2| anyhow!("Failed to start wintun session: {}", e2))?
+            }
+        };
         self.session = Some(session.clone());
 
         task::spawn_blocking(move || {
@@ -358,6 +388,10 @@ impl TunnelManager {
                             error!("Failed to send packet to channel: {}", e);
                             break;
                         }
+                    }
+                    Err(wintun::Error::ShuttingDown) => {
+                        info!("WinTUN reader thread received clean shutdown signal");
+                        break;
                     }
                     Err(e) => {
                         error!("Error reading from TUN: {:?}", e);
@@ -395,18 +429,20 @@ impl TunnelManager {
     /// Closes session and removes adapter routes & firewall rules
     pub fn shutdown(&mut self) -> Result<()> {
         info!("Shutting down TunnelManager");
+        if let Some(session) = self.session.take() {
+            info!("Signaling WinTUN session shutdown to unblock reader thread");
+            let _ = session.shutdown();
+        }
         if let Ok(name) = self.adapter.get_name() {
             let netsh_bin = resolve_netsh_path();
-            let _ = Command::new(&netsh_bin)
+            let _ = silent_command(&netsh_bin)
                 .args(&["interface", "ipv4", "delete", "route", "10.7.0.0/24", &name])
                 .status();
-            let _ = Command::new(&netsh_bin)
+            let _ = silent_command(&netsh_bin)
                 .args(&["interface", "ipv4", "delete", "route", "10.7.0.255/32", &name])
                 .status();
         }
         cleanup_elysium_firewall();
-        self.session = None;
-        // Adapter drop will close it
         Ok(())
     }
 }

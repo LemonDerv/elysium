@@ -77,29 +77,28 @@ impl ProbeEngine {
 
         let _seq = u32::from_be_bytes(resp_payload[8..12].try_into().ok()?);
         let t1 = u64::from_be_bytes(resp_payload[16..24].try_into().ok()?);
-        let t2 = u64::from_be_bytes(resp_payload[24..32].try_into().ok()?);
         let t4 = self.base_time.elapsed().as_nanos() as u64;
 
-        // Exact RTT removing hold time
+        // Exact RTT measured entirely on the sender's monotonic clock
         let rtt_ns = if t4 >= t1 { t4 - t1 } else { 0 };
         let rtt_ms = rtt_ns as f64 / 1_000_000.0;
+        let rtt_us = rtt_ns as f64 / 1_000.0;
 
-        // RFC 3550 Inter-Packet Delay Variation (IPDV)
-        let transit = (t2 as i64) - (t1 as i64);
+        // RFC 3550 Running Jitter Smoothing based on RTT variation
         if let Some(prev) = self.last_transit {
-            let diff = (transit - prev).abs() as f64 / 1_000.0; // In microseconds
+            let diff = (rtt_us - (prev as f64)).abs();
             self.jitter_us += (diff - self.jitter_us) / 16.0;
         }
-        self.last_transit = Some(transit);
+        self.last_transit = Some(rtt_us as i64);
 
-        // Update 64-bit sliding window
+        // Update 64-bit sliding window (1 = received response)
         self.loss_window = (self.loss_window << 1) | 1;
         let received_count = self.loss_window.count_ones();
         let packet_loss_pct = ((64 - received_count) as f64 / 64.0) * 100.0;
 
         Some(JitterStats {
-            rtt_ms: (rtt_ms * 100.0).round() / 100.0,
-            jitter_ms: ((self.jitter_us / 1000.0) * 100.0).round() / 100.0,
+            rtt_ms: (rtt_ms * 10.0).round() / 10.0,
+            jitter_ms: ((self.jitter_us / 1000.0) * 10.0).round() / 10.0,
             packet_loss_pct: (packet_loss_pct * 10.0).round() / 10.0,
         })
     }

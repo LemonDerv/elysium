@@ -72,9 +72,9 @@ impl Room {
             public_key: host_public_key.clone(),
             virtual_ip: host_ip,
             node_name: host_node_name,
-            latency_ms: Some(0.0),
-            jitter_ms: Some(0.0),
-            packet_loss_pct: Some(0.0),
+            latency_ms: None,
+            jitter_ms: None,
+            packet_loss_pct: None,
             connected: true,
         };
 

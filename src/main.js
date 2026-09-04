@@ -479,7 +479,7 @@ function renderPeers(peers, localNodeName, localVirtualIp) {
     const isHost = p.virtual_ip === '10.7.0.1';
 
     let latencyHtml = '<span class="peer-latency-badge text-muted">—</span>';
-    if (p.latency_ms != null) {
+    if (!isSelf && p.latency_ms != null && p.latency_ms > 0) {
       const lat = p.latency_ms;
       let latencyClass = 'good';
       if (lat > 80) latencyClass = 'moderate';
@@ -491,9 +491,9 @@ function renderPeers(peers, localNodeName, localVirtualIp) {
 
       latencyHtml = `
         <div class="peer-latency-metrics">
-          <span class="peer-latency-badge ${latencyClass}" title="RTT: ${lat.toFixed(1)}ms | Jitter: ${jitterVal.toFixed(2)}ms | Loss: ${lossVal.toFixed(1)}%">
+          <span class="peer-latency-badge ${latencyClass}" title="RTT: ${lat.toFixed(1)}ms | Jitter: ${jitterVal.toFixed(1)}ms | Loss: ${lossVal.toFixed(1)}%">
             <svg class="icon icon-sm"><use href="#icon-activity"></use></svg>
-            <span>${lat.toFixed(1)} ms</span>
+            <span>${lat < 1.0 ? '<1 ms' : `${lat.toFixed(1)} ms`}</span>
           </span>
           <span class="peer-jitter-subtext ${hasLoss ? 'has-loss' : ''}">
             ±${jitterVal.toFixed(1)}ms jitter${lossVal > 0 ? ` · ${lossVal.toFixed(0)}% loss` : ''}

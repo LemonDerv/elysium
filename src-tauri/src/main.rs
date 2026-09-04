@@ -197,7 +197,7 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
     let secret_key = config.get_keypair().map_err(|e| e.to_string())?;
     drop(config);
 
-    let mut rm = state.room_manager.lock().await;
+    let rm = state.room_manager.lock().await;
     if rm.get_active_room().is_some() {
         return Err("You must leave your current room before joining another".to_string());
     }
@@ -233,9 +233,6 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
         packet_loss_pct: None,
         connected: true,
     });
-    rm.set_active_room(room);
-    drop(rm);
-
     // Start networking
     let tunnel = network::tunnel::TunnelManager::create_adapter("ElysiumLAN").map_err(|e| e.to_string())?;
     tunnel.set_ip(ip, std::net::Ipv4Addr::new(255, 255, 255, 0)).map_err(|e| e.to_string())?;
@@ -255,6 +252,11 @@ async fn join_room(code: String, state: State<'_, AppState>) -> Result<String, S
     
     engine.start().await.map_err(|e| e.to_string())?;
     engine.add_connection(host_ip, conn.clone()).await;
+
+    // Set active room only after network engine and tunnel are successfully running
+    let mut rm = state.room_manager.lock().await;
+    rm.set_active_room(room);
+    drop(rm);
 
     // Spawn background task on client to listen for dynamic roster updates from host
     let conn_roster = conn.clone();
@@ -358,7 +360,13 @@ async fn get_known_rooms(state: State<'_, AppState>) -> Result<Vec<String>, Stri
 fn main() {
     // Add firewall rule for the app
     if let Ok(exe_path) = std::env::current_exe() {
-        let _ = std::process::Command::new(crate::network::tunnel::resolve_netsh_path())
+        let mut cmd = std::process::Command::new(crate::network::tunnel::resolve_netsh_path());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let _ = cmd
             .args(&[
                 "advfirewall", "firewall", "add", "rule",
                 "name=Elysium LAN",
